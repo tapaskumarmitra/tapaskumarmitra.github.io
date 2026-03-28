@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "source": "ruilings.json",
+    "generatedOn": "2026-03-28",
+    "model": "gemini-2.0-flash",
+    "totalEntries": 0,
+    "topK": 4,
+    "candidateK": 14,
+    "note": "Populate this file using scripts/build_related_ruilings_with_llm.py"
+  },
+  "related": {}
+}
