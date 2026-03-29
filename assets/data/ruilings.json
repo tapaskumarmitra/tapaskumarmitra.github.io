@@ -1,7 +1,7 @@
 {
   "meta": {
     "source": "Untitled spreadsheet - Sheet1.csv",
-    "totalEntries": 132,
+    "totalEntries": 133,
     "categoryCounts": {
       "Civil Procedure & Adjudication": 32,
       "Evidence Law & Trial Proof": 25,
@@ -11,7 +11,7 @@
       "Sexual Offences & Gender Justice": 13,
       "Constitutional Rights in Litigation": 4,
       "Commercial & Financial Litigation": 3,
-      "General Litigation Principles": 1,
+      "General Litigation Principles": 2,
       "Legal Method & Professional Conduct": 1
     },
     "subCategoryBreakdown": [
@@ -233,6 +233,11 @@
       {
         "category": "Family & Matrimonial Law",
         "subCategory": "Muslim Women Maintenance Rights & Constitutional Validity of MWPRDA",
+        "count": 1
+      },
+      {
+        "category": "General Litigation Principles",
+        "subCategory": "General legal principles",
         "count": 1
       },
       {
@@ -3158,6 +3163,23 @@
       ],
       "relatedDetails": [
         "Test Data (Not Actual)"
+      ]
+    },
+    {
+      "id": 133,
+      "serial": 133,
+      "caseReference": "TEst",
+      "issue": "Test",
+      "holding": "Test",
+      "category": "General Litigation Principles",
+      "subCategory": "General legal principles",
+      "court": "Reported Court (See citation)",
+      "year": null,
+      "stage": "Initial assessment",
+      "statuteTags": [],
+      "advocateNotes": [
+        "Focus on foundational legal concepts.",
+        "Consider the broader implications of procedural steps."
       ]
     }
   ]
