@@ -6,7 +6,10 @@
   const API_BASE = String(window.ATLAS_API_BASE || '').trim().replace(/\/+$/, '');
   const API_WAKE_RETRY_INITIAL_TIMEOUT_MS = 12000;
   const API_WAKE_RETRY_TIMEOUT_MS = 70000;
+  const SEMANTIC_SEARCH_INITIAL_TIMEOUT_MS = 5000;
+  const SEMANTIC_SEARCH_RETRY_TIMEOUT_MS = 12000;
   const WAKEUP_TOAST_COOLDOWN_MS = 120000;
+  const CLIENT_KEEPALIVE_INTERVAL_MS = 240000;
   const LOCAL_DRAFT_STORAGE_KEY = 'atlasRuilingsDraftEntriesV1';
   const DEFAULT_NOTES = [
     'Align this citation with factual matrix and stage before relying in court.',
@@ -33,6 +36,9 @@
       rankedIds: [],
       requestSeq: 0,
       cache: new Map(),
+    },
+    serverWarm: {
+      status: API_BASE ? 'checking' : 'ready',
     },
   };
 
@@ -85,6 +91,8 @@
     addRuilingModalLabel: document.getElementById('addRuilingModalLabel'),
     addModeBadge: document.getElementById('addModeBadge'),
     addModalHelpText: document.getElementById('addModalHelpText'),
+    serverWarmStatus: document.getElementById('serverWarmStatus'),
+    serverWarmStatusText: document.getElementById('serverWarmStatusText'),
   };
 
   let viewModalInstance = null;
@@ -93,6 +101,8 @@
   let addFormMode = 'add';
   let editingEntryId = null;
   let lastWakeupToastAt = 0;
+  let keepaliveIntervalId = null;
+  let warmupInFlight = null;
 
   if (!els.cardsGrid) {
     return;
@@ -100,6 +110,7 @@
 
   loadData();
   bindEvents();
+  initApiWarmup();
 
   function apiPath(path) {
     const normalizedPath = String(path || '').trim();
@@ -387,6 +398,89 @@
     }
   }
 
+  function setServerWarmStatus(status, message) {
+    const normalized = ['ready', 'checking', 'waking'].includes(status) ? status : 'checking';
+    state.serverWarm.status = normalized;
+
+    if (!els.serverWarmStatus || !els.serverWarmStatusText) {
+      return;
+    }
+
+    els.serverWarmStatus.classList.remove('ready', 'checking', 'waking');
+    els.serverWarmStatus.classList.add(normalized);
+    els.serverWarmStatusText.textContent = String(message || '').trim() || 'Connecting secure server...';
+  }
+
+  async function warmupApi({ silent = true, timeoutMs = 10000 } = {}) {
+    if (!API_BASE) {
+      setServerWarmStatus('ready', 'Server connection not required.');
+      return true;
+    }
+    if (warmupInFlight) {
+      return warmupInFlight;
+    }
+
+    if (state.serverWarm.status !== 'ready') {
+      setServerWarmStatus('checking', 'Connecting secure server...');
+    }
+
+    warmupInFlight = (async () => {
+      try {
+        const endpoint = apiPath(`/warmup?t=${Date.now()}`);
+        const response = await fetchWithTimeout(
+          endpoint,
+          { method: 'GET', cache: 'no-store' },
+          timeoutMs
+        );
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok || body?.ok === false) {
+          throw new Error(body?.error || body?.status || 'Warmup failed.');
+        }
+
+        setServerWarmStatus('ready', 'Secure server ready.');
+        return true;
+      } catch (error) {
+        setServerWarmStatus('waking', 'Server waking up. First secure action may take longer.');
+        if (!silent && isLikelyColdStartError(error)) {
+          notifyServerWakeup('secure operations');
+        }
+        return false;
+      } finally {
+        warmupInFlight = null;
+      }
+    })();
+
+    return warmupInFlight;
+  }
+
+  function startClientKeepalive() {
+    if (!API_BASE || keepaliveIntervalId) {
+      return;
+    }
+
+    keepaliveIntervalId = window.setInterval(() => {
+      if (document.hidden) {
+        return;
+      }
+      warmupApi({ silent: true, timeoutMs: 9000 });
+    }, CLIENT_KEEPALIVE_INTERVAL_MS);
+  }
+
+  function initApiWarmup() {
+    if (!API_BASE) {
+      setServerWarmStatus('ready', 'Server connection not required.');
+      return;
+    }
+
+    warmupApi({ silent: false, timeoutMs: 11000 });
+    startClientKeepalive();
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) {
+        warmupApi({ silent: true, timeoutMs: 9000 });
+      }
+    });
+  }
+
   function switchAddFormMode(mode, entry) {
     const resolvedMode = mode === 'edit' ? 'edit' : 'add';
     addFormMode = resolvedMode;
@@ -496,6 +590,10 @@
       'info'
     );
 
+    if (API_BASE) {
+      await warmupApi({ silent: true, timeoutMs: 4500 });
+    }
+
     const endpoint = apiPath(isEdit ? '/api/ruilings/edit' : '/api/ruilings/add');
     let apiError = null;
 
@@ -517,6 +615,7 @@
         renderHeroStats();
         applyFiltersAndRender();
       }
+      setServerWarmStatus('ready', 'Secure server ready.');
 
       resetAddForm();
       switchAddFormMode('add');
@@ -594,6 +693,10 @@
     showToast('Deleting ruiling', 'Delete is being processed.', 'info');
     let apiError = null;
 
+    if (API_BASE) {
+      await warmupApi({ silent: true, timeoutMs: 4500 });
+    }
+
     try {
       const { body } = await postJsonApiWithWakeRetry({
         endpoint: apiPath('/api/ruilings/delete'),
@@ -606,6 +709,7 @@
       if (body.meta) {
         state.meta = body.meta;
       }
+      setServerWarmStatus('ready', 'Secure server ready.');
       if (currentViewEntry && Number(currentViewEntry.id || currentViewEntry.serial) === entryId) {
         currentViewEntry = null;
         if (viewModalInstance) {
@@ -671,22 +775,19 @@
     applyFiltersAndRender();
 
     try {
-      const response = await fetch(apiPath('/api/ruilings/search'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const { body } = await postJsonApiWithWakeRetry({
+        endpoint: apiPath('/api/ruilings/search'),
+        payload: {
           query: oneLine(rawQuery),
           topK: 80,
-        }),
+        },
+        actionLabel: 'AI search ranking',
+        initialTimeoutMs: SEMANTIC_SEARCH_INITIAL_TIMEOUT_MS,
+        retryTimeoutMs: SEMANTIC_SEARCH_RETRY_TIMEOUT_MS,
+        suppressWakeToast: true,
       });
-
-      const body = await response.json().catch(() => ({}));
       if (requestSeq !== state.llmSearch.requestSeq) {
         return;
-      }
-
-      if (!response.ok || !body?.ok) {
-        throw new Error(body?.error || 'Semantic search unavailable');
       }
 
       const rankedIds = Array.isArray(body.rankedIds)
@@ -701,12 +802,14 @@
       state.llmSearch.query = normalizedQuery;
       state.llmSearch.rankedIds = rankedIds;
       state.llmSearch.cache.set(normalizedQuery, rankedIds);
+      setServerWarmStatus('ready', 'Secure server ready.');
     } catch (error) {
       if (requestSeq !== state.llmSearch.requestSeq) {
         return;
       }
       console.warn('LLM semantic search unavailable, using keyword mode.', error);
       if (isLikelyColdStartError(error)) {
+        setServerWarmStatus('waking', 'Server waking up. Keyword search remains available.');
         notifyServerWakeup('AI search ranking');
       }
       state.llmSearch.status = 'error';
@@ -1911,16 +2014,30 @@
     return { response, body };
   }
 
-  async function postJsonApiWithWakeRetry({ endpoint, payload, actionLabel }) {
+  async function postJsonApiWithWakeRetry({
+    endpoint,
+    payload,
+    actionLabel,
+    initialTimeoutMs = API_WAKE_RETRY_INITIAL_TIMEOUT_MS,
+    retryTimeoutMs = API_WAKE_RETRY_TIMEOUT_MS,
+    suppressWakeToast = false,
+  }) {
     try {
-      return await postJsonApi(endpoint, payload, API_WAKE_RETRY_INITIAL_TIMEOUT_MS);
+      const result = await postJsonApi(endpoint, payload, initialTimeoutMs);
+      setServerWarmStatus('ready', 'Secure server ready.');
+      return result;
     } catch (firstError) {
       if (!isLikelyColdStartError(firstError)) {
         throw firstError;
       }
 
-      notifyServerWakeup(actionLabel);
-      return postJsonApi(endpoint, payload, API_WAKE_RETRY_TIMEOUT_MS);
+      setServerWarmStatus('waking', 'Server waking up. Please wait...');
+      if (!suppressWakeToast) {
+        notifyServerWakeup(actionLabel);
+      }
+      const retryResult = await postJsonApi(endpoint, payload, retryTimeoutMs);
+      setServerWarmStatus('ready', 'Secure server ready.');
+      return retryResult;
     }
   }
 

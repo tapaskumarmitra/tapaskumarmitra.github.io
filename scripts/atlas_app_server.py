@@ -3,6 +3,7 @@
 Local Atlas app server:
 - Serves project files
 - Exposes GET /health for health checks
+- Exposes GET /warmup to prime cache and dependencies
 - Exposes POST /api/ruilings/add for one-click ruiling add from UI
 - Exposes POST /api/ruilings/edit for in-place ruiling edits from UI
 - Exposes POST /api/ruilings/delete for deletion from UI
@@ -17,6 +18,8 @@ import threading
 import argparse
 import re
 import os
+import time
+from collections import OrderedDict
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,6 +61,22 @@ def parse_allowed_origins() -> set[str]:
 
 
 ALLOWED_ORIGINS = parse_allowed_origins()
+
+
+def parse_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = str(os.getenv(name, str(default)) or "").strip()
+    try:
+        value = int(raw)
+    except Exception:  # noqa: BLE001
+        value = default
+    return max(minimum, min(value, maximum))
+
+
+def parse_env_bool(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "y", "on"}
 
 
 def clean(value: Any) -> str:
@@ -103,28 +122,104 @@ REPO_STORE = load_repo_store_from_env()
 PERSISTENCE_MODE = "github" if REPO_STORE else "local_file"
 PERSISTENCE_DATA_PATH = REPO_STORE.config.data_path if REPO_STORE else str(DEFAULT_DB_PATH)
 
+DB_CACHE_TTL_SECONDS = parse_env_int("DB_CACHE_TTL_SECONDS", 90, minimum=5, maximum=600)
+SEARCH_LLM_TIMEOUT_SECONDS = parse_env_int("SEARCH_LLM_TIMEOUT_SECONDS", 18, minimum=4, maximum=60)
+SEARCH_LLM_CANDIDATE_LIMIT = parse_env_int("SEARCH_LLM_CANDIDATE_LIMIT", 42, minimum=10, maximum=120)
+SEARCH_CACHE_TTL_SECONDS = parse_env_int("SEARCH_CACHE_TTL_SECONDS", 600, minimum=30, maximum=3600)
+SEARCH_CACHE_MAX_ENTRIES = parse_env_int("SEARCH_CACHE_MAX_ENTRIES", 120, minimum=20, maximum=500)
+SEARCH_DISABLE_LLM = parse_env_bool("SEARCH_DISABLE_LLM", default=False)
 
-def load_db_payload() -> tuple[Dict[str, Any], str | None]:
-    if REPO_STORE:
-        payload, sha = REPO_STORE.read_json_file()
-        return payload, sha
+_DB_CACHE_PAYLOAD: Dict[str, Any] | None = None
+_DB_CACHE_SHA: str | None = None
+_DB_CACHE_AT = 0.0
+_SEARCH_CACHE: OrderedDict[str, tuple[float, List[int], bool, bool]] = OrderedDict()
 
+
+def clear_search_cache() -> None:
+    _SEARCH_CACHE.clear()
+
+
+def get_search_cache(cache_key: str) -> tuple[List[int], bool, bool] | None:
+    cached = _SEARCH_CACHE.get(cache_key)
+    if not cached:
+        return None
+
+    stored_at, ranked_ids, llm_fallback_used, llm_attempted = cached
+    if time.time() - stored_at > SEARCH_CACHE_TTL_SECONDS:
+        _SEARCH_CACHE.pop(cache_key, None)
+        return None
+
+    _SEARCH_CACHE.move_to_end(cache_key)
+    return list(ranked_ids), bool(llm_fallback_used), bool(llm_attempted)
+
+
+def put_search_cache(cache_key: str, ranked_ids: List[int], llm_fallback_used: bool, llm_attempted: bool) -> None:
+    _SEARCH_CACHE[cache_key] = (
+        time.time(),
+        list(ranked_ids),
+        bool(llm_fallback_used),
+        bool(llm_attempted),
+    )
+    _SEARCH_CACHE.move_to_end(cache_key)
+    while len(_SEARCH_CACHE) > SEARCH_CACHE_MAX_ENTRIES:
+        _SEARCH_CACHE.popitem(last=False)
+
+
+def _read_local_db_payload() -> Dict[str, Any]:
     path = Path(DEFAULT_DB_PATH)
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("Invalid database structure: root JSON object missing.")
-    return raw, None
+    return raw
+
+
+def _read_repo_db_payload() -> tuple[Dict[str, Any], str | None]:
+    payload, sha = REPO_STORE.read_json_file()
+    if not isinstance(payload, dict):
+        raise ValueError("Invalid database structure: root JSON object missing.")
+    return payload, sha
+
+
+def load_db_payload(*, force_refresh: bool = False) -> tuple[Dict[str, Any], str | None]:
+    global _DB_CACHE_PAYLOAD, _DB_CACHE_SHA, _DB_CACHE_AT
+
+    if REPO_STORE:
+        cache_is_fresh = (
+            not force_refresh
+            and _DB_CACHE_PAYLOAD is not None
+            and (time.time() - _DB_CACHE_AT) <= DB_CACHE_TTL_SECONDS
+        )
+        if cache_is_fresh:
+            return _DB_CACHE_PAYLOAD, _DB_CACHE_SHA
+
+        payload, sha = _read_repo_db_payload()
+        _DB_CACHE_PAYLOAD = payload
+        _DB_CACHE_SHA = sha
+        _DB_CACHE_AT = time.time()
+        return payload, sha
+
+    payload = _read_local_db_payload()
+    return payload, None
 
 
 def persist_db_payload(payload: Dict[str, Any], *, sha: str | None, commit_message: str) -> None:
+    global _DB_CACHE_PAYLOAD, _DB_CACHE_SHA, _DB_CACHE_AT
+
     if REPO_STORE:
         if not sha:
             raise RuntimeError("Missing GitHub file SHA for repository update.")
-        REPO_STORE.write_json_file(content=payload, sha=sha, commit_message=commit_message)
+        response = REPO_STORE.write_json_file(content=payload, sha=sha, commit_message=commit_message)
+        content_meta = response.get("content") if isinstance(response, dict) else {}
+        next_sha = clean(content_meta.get("sha")) if isinstance(content_meta, dict) else ""
+        _DB_CACHE_PAYLOAD = payload
+        _DB_CACHE_SHA = next_sha or sha
+        _DB_CACHE_AT = time.time()
+        clear_search_cache()
         return
 
     path = Path(DEFAULT_DB_PATH)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    clear_search_cache()
 
 
 def build_commit_message(action: str, serial: int, case_reference: str) -> str:
@@ -208,6 +303,20 @@ def parse_ranked_ids(payload: Dict[str, Any], valid_ids: set[int], top_k: int) -
     return out
 
 
+def merge_ranked_ids(primary: List[int], secondary: List[int], top_k: int) -> List[int]:
+    out: List[int] = []
+    seen = set()
+    for bucket in (primary, secondary):
+        for value in bucket:
+            if value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
+            if len(out) >= top_k:
+                return out
+    return out
+
+
 def keyword_rank_ids(query: str, entries: List[Dict[str, Any]], top_k: int) -> List[int]:
     normalized_query = clean(query).lower()
     terms = [term for term in re.split(r"[^a-z0-9]+", normalized_query) if len(term) >= 2]
@@ -265,6 +374,9 @@ class AtlasHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path == "/warmup":
+            self._handle_warmup()
+            return
         if parsed.path == "/health":
             self._send_json(
                 HTTPStatus.OK,
@@ -275,6 +387,8 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     "persistenceMode": PERSISTENCE_MODE,
                     "dataPath": PERSISTENCE_DATA_PATH,
                     "githubConfigured": bool(REPO_STORE),
+                    "dbCacheTtlSeconds": DB_CACHE_TTL_SECONDS,
+                    "searchLlmTimeoutSeconds": SEARCH_LLM_TIMEOUT_SECONDS,
                 },
             )
             return
@@ -320,6 +434,39 @@ class AtlasHandler(SimpleHTTPRequestHandler):
             HTTPStatus.NOT_FOUND,
             f"Endpoint not found: {parsed.path}",
             code="endpoint_not_found",
+        )
+
+    def _handle_warmup(self) -> None:
+        started = time.perf_counter()
+        warmed = {
+            "dbLoaded": False,
+            "entryCount": 0,
+            "geminiKeyConfigured": bool(load_gemini_api_key("")),
+        }
+
+        try:
+            with DB_LOCK:
+                payload, _ = load_db_payload()
+            entries = payload.get("entries", []) if isinstance(payload, dict) else []
+            warmed["dbLoaded"] = True
+            warmed["entryCount"] = len(entries) if isinstance(entries, list) else 0
+            status = HTTPStatus.OK
+        except Exception as exc:  # noqa: BLE001
+            warmed["error"] = clean(str(exc)) or "Warmup failed."
+            status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
+
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        self._send_json(
+            status,
+            {
+                "ok": status == HTTPStatus.OK,
+                "service": "atlas-app-server",
+                "status": "warmed" if status == HTTPStatus.OK else "warmup_failed",
+                "persistenceMode": PERSISTENCE_MODE,
+                "dataPath": PERSISTENCE_DATA_PATH,
+                "elapsedMs": elapsed_ms,
+                "warmed": warmed,
+            },
         )
 
     def _handle_add_ruiling(self) -> None:
@@ -587,9 +734,28 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         top_k = parse_top_k(payload.get("topK"), default=80)
         model = clean(payload.get("model")) or DEFAULT_GEMINI_MODEL
         gemini_api_key = clean(payload.get("geminiApiKey"))
+        keyword_only = bool(payload.get("keywordOnly")) or SEARCH_DISABLE_LLM
+        force_refresh = bool(payload.get("refresh"))
+        cache_key = f"{query.lower()}::{top_k}::{model}::{1 if keyword_only else 0}"
 
         try:
             with DB_LOCK:
+                if not force_refresh:
+                    cached = get_search_cache(cache_key)
+                    if cached:
+                        cached_ids, cached_fallback, cached_llm_attempted = cached
+                        self._send_json(
+                            HTTPStatus.OK,
+                            {
+                                "ok": True,
+                                "query": query,
+                                "rankedIds": cached_ids,
+                                "llmFallbackUsed": bool(cached_fallback),
+                                "llmAttempted": bool(cached_llm_attempted),
+                                "cacheHit": True,
+                            },
+                        )
+                        return
                 raw, _ = load_db_payload()
         except Exception as exc:  # noqa: BLE001
             status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
@@ -612,37 +778,56 @@ class AtlasHandler(SimpleHTTPRequestHandler):
             if int(entry.get("id") or entry.get("serial") or 0) > 0
         ]
         valid_ids = {int(item["id"]) for item in compact_entries if int(item["id"]) > 0}
+        keyword_rank_cap = max(top_k, SEARCH_LLM_CANDIDATE_LIMIT)
+        keyword_ids = keyword_rank_ids(query, compact_entries, keyword_rank_cap)
 
-        ranked_ids: List[int] = []
-        llm_fallback_used = False
+        ranked_ids: List[int] = keyword_ids[:top_k]
+        llm_fallback_used = True
+        llm_attempted = False
 
-        api_key = load_gemini_api_key(gemini_api_key)
-        if api_key:
-            user_prompt = (
-                f"User query:\n{query}\n\n"
-                f"Maximum ids to return: {top_k}\n\n"
-                "Entries JSON:\n"
-                f"{json.dumps(compact_entries, ensure_ascii=False)}\n\n"
-                "Return JSON object with key rankedIds."
-            )
-            try:
-                llm_result = call_gemini_json(
-                    api_key=api_key,
-                    model=model,
-                    system_prompt=SEARCH_SYSTEM_PROMPT,
-                    user_prompt=user_prompt,
-                    temperature=0.1,
-                    timeout=90,
+        if not keyword_only and valid_ids:
+            api_key = load_gemini_api_key(gemini_api_key)
+            if api_key:
+                llm_attempted = True
+
+                candidate_ids = keyword_ids[:SEARCH_LLM_CANDIDATE_LIMIT]
+                if not candidate_ids:
+                    candidate_ids = [int(item["id"]) for item in compact_entries[:SEARCH_LLM_CANDIDATE_LIMIT]]
+
+                candidate_set = set(candidate_ids)
+                candidate_entries = [
+                    item for item in compact_entries if int(item.get("id") or 0) in candidate_set
+                ]
+                candidate_valid_ids = {int(item["id"]) for item in candidate_entries if int(item["id"]) > 0}
+
+                user_prompt = (
+                    f"User query:\n{query}\n\n"
+                    f"Maximum ids to return: {top_k}\n\n"
+                    "Entries JSON:\n"
+                    f"{json.dumps(candidate_entries, ensure_ascii=False)}\n\n"
+                    "Return JSON object with key rankedIds."
                 )
-                ranked_ids = parse_ranked_ids(llm_result, valid_ids, top_k)
-            except Exception:  # noqa: BLE001
+                try:
+                    llm_result = call_gemini_json(
+                        api_key=api_key,
+                        model=model,
+                        system_prompt=SEARCH_SYSTEM_PROMPT,
+                        user_prompt=user_prompt,
+                        temperature=0.1,
+                        timeout=SEARCH_LLM_TIMEOUT_SECONDS,
+                    )
+                    llm_ids = parse_ranked_ids(llm_result, candidate_valid_ids, top_k)
+                    if llm_ids:
+                        ranked_ids = merge_ranked_ids(llm_ids, keyword_ids, top_k)
+                        llm_fallback_used = False
+                except Exception:  # noqa: BLE001
+                    llm_fallback_used = True
+            else:
                 llm_fallback_used = True
-        else:
-            llm_fallback_used = True
+                llm_attempted = False
 
-        if not ranked_ids:
-            llm_fallback_used = True
-            ranked_ids = keyword_rank_ids(query, compact_entries, top_k)
+        with DB_LOCK:
+            put_search_cache(cache_key, ranked_ids, llm_fallback_used, llm_attempted)
 
         self._send_json(
             HTTPStatus.OK,
@@ -651,6 +836,8 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                 "query": query,
                 "rankedIds": ranked_ids,
                 "llmFallbackUsed": llm_fallback_used,
+                "llmAttempted": llm_attempted,
+                "cacheHit": False,
             },
         )
 
@@ -738,7 +925,17 @@ def main() -> None:
     print(f"Atlas app server running at http://{host}:{port}")
     print(f"Open http://{host}:{port}/ruilings")
     print(f"Health check: http://{host}:{port}/health")
+    print(f"Warmup endpoint: http://{host}:{port}/warmup")
     print(f"Persistence mode: {PERSISTENCE_MODE} ({PERSISTENCE_DATA_PATH})")
+    print(
+        "Runtime tuning:"
+        f" DB_CACHE_TTL_SECONDS={DB_CACHE_TTL_SECONDS},"
+        f" SEARCH_LLM_TIMEOUT_SECONDS={SEARCH_LLM_TIMEOUT_SECONDS},"
+        f" SEARCH_LLM_CANDIDATE_LIMIT={SEARCH_LLM_CANDIDATE_LIMIT},"
+        f" SEARCH_CACHE_TTL_SECONDS={SEARCH_CACHE_TTL_SECONDS},"
+        f" SEARCH_CACHE_MAX_ENTRIES={SEARCH_CACHE_MAX_ENTRIES},"
+        f" SEARCH_DISABLE_LLM={SEARCH_DISABLE_LLM}"
+    )
     if ALLOWED_ORIGINS:
         print(f"CORS allowlist active: {', '.join(sorted(ALLOWED_ORIGINS))}")
     else:
