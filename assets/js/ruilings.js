@@ -77,6 +77,7 @@
     viewRuilingRelatedList: document.getElementById('viewRuilingRelatedList'),
     copyViewCitation: document.getElementById('copyViewCitation'),
     editViewRuiling: document.getElementById('editViewRuiling'),
+    deleteViewRuiling: document.getElementById('deleteViewRuiling'),
     openAddRuilingBtn: document.getElementById('openAddRuilingBtn'),
     addRuilingModalLabel: document.getElementById('addRuilingModalLabel'),
     addModeBadge: document.getElementById('addModeBadge'),
@@ -229,6 +230,13 @@
         return;
       }
 
+      const deleteButton = event.target.closest('button[data-delete-id]');
+      if (deleteButton) {
+        const entryId = Number(deleteButton.dataset.deleteId || 0);
+        await confirmAndDeleteRuiling(entryId);
+        return;
+      }
+
       const copyButton = event.target.closest('button[data-copy-ref]');
       if (copyButton) {
         const citation = copyButton.dataset.copyRef || '';
@@ -301,6 +309,13 @@
           return;
         }
 
+        const deleteButton = event.target.closest('button[data-delete-entry-id]');
+        if (deleteButton) {
+          const entryId = Number(deleteButton.dataset.deleteEntryId || 0);
+          await confirmAndDeleteRuiling(entryId);
+          return;
+        }
+
         const copyButton = event.target.closest('button[data-copy-ref]');
         if (!copyButton) {
           return;
@@ -340,6 +355,13 @@
       els.editViewRuiling.addEventListener('click', () => {
         const entryId = Number(currentViewEntry?.id || currentViewEntry?.serial || 0);
         openEditRuilingForm(entryId);
+      });
+    }
+
+    if (els.deleteViewRuiling) {
+      els.deleteViewRuiling.addEventListener('click', async () => {
+        const entryId = Number(currentViewEntry?.id || currentViewEntry?.serial || 0);
+        await confirmAndDeleteRuiling(entryId);
       });
     }
 
@@ -554,6 +576,86 @@
       console.error(apiError || localError);
       showToast(isEdit ? 'Save Failed' : 'Add Failed', 'Could not save right now. Please try again.', 'danger');
     }
+  }
+
+  async function confirmAndDeleteRuiling(entryId) {
+    if (!Number.isFinite(entryId) || entryId <= 0) {
+      return;
+    }
+
+    const entry = state.entriesById.get(entryId);
+    if (!entry) {
+      showToast('Not found', 'Could not find this ruiling to delete.', 'warning');
+      return;
+    }
+
+    const reference = oneLine(entry.caseReference || `#${entryId}`);
+    const confirmed = window.confirm(`Delete this ruiling?\n\n${reference}\n\nThis action cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    showToast('Deleting ruiling', 'Delete is being processed.', 'info');
+    let apiError = null;
+
+    try {
+      const response = await fetch(apiPath('/api/ruilings/delete'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: entryId }),
+      });
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body?.ok) {
+        const message = String(body?.error || '').trim() || 'Could not delete ruiling right now.';
+        const err = new Error(message);
+        err.status = response.status;
+        throw err;
+      }
+
+      removeEntryFromState(entryId);
+      removeLocalDraftEntry(entryId);
+      if (body.meta) {
+        state.meta = body.meta;
+      }
+      if (currentViewEntry && Number(currentViewEntry.id || currentViewEntry.serial) === entryId) {
+        currentViewEntry = null;
+        if (viewModalInstance) {
+          viewModalInstance.hide();
+        }
+      }
+      populateGlobalFilters();
+      renderHeroStats();
+      applyFiltersAndRender();
+      showToast('Ruiling Deleted', `Entry #${body.serial || entryId} deleted successfully.`, 'success');
+      return;
+    } catch (error) {
+      apiError = error;
+      if (!shouldUseLocalDraftFallback(error)) {
+        console.error(error);
+        showToast('Delete Failed', String(error?.message || 'Could not delete right now.'), 'danger');
+        return;
+      }
+    }
+
+    if (!entry.localDraft) {
+      console.error(apiError);
+      showToast('Delete Failed', 'Could not reach API. Entry was not deleted.', 'danger');
+      return;
+    }
+
+    removeEntryFromState(entryId);
+    removeLocalDraftEntry(entryId);
+    if (currentViewEntry && Number(currentViewEntry.id || currentViewEntry.serial) === entryId) {
+      currentViewEntry = null;
+      if (viewModalInstance) {
+        viewModalInstance.hide();
+      }
+    }
+    populateGlobalFilters();
+    renderHeroStats();
+    applyFiltersAndRender();
+    showToast('Deleted Local Draft', 'Local draft ruiling deleted from this browser.', 'warning');
   }
 
   async function triggerLlmSemanticSearch(rawQuery) {
@@ -898,6 +1000,7 @@
 
             <div class="ruiling-card-footer">
               <button type="button" class="mini-action-btn view-btn" data-edit-id="${Number(entry.id || entry.serial)}">Edit</button>
+              <button type="button" class="mini-action-btn delete-btn" data-delete-id="${Number(entry.id || entry.serial)}">Delete</button>
               <button type="button" class="mini-action-btn" data-copy-ref="${escapeAttribute(entry.caseReference || '')}">Copy Citation</button>
             </div>
           </article>
@@ -1121,6 +1224,16 @@
       state.entries.push(normalized);
     }
     state.entriesById.set(id, normalized);
+  }
+
+  function removeEntryFromState(entryId) {
+    const id = Number(entryId || 0);
+    if (!Number.isFinite(id) || id <= 0) {
+      return;
+    }
+
+    state.entries = state.entries.filter((item) => Number(item.id || item.serial) !== id);
+    state.entriesById.delete(id);
   }
 
   function normalizeEntryForState(entry) {
@@ -1422,6 +1535,10 @@
 
     if (els.editViewRuiling) {
       els.editViewRuiling.dataset.editEntryId = String(entry.id || entry.serial || '');
+    }
+
+    if (els.deleteViewRuiling) {
+      els.deleteViewRuiling.dataset.deleteEntryId = String(entry.id || entry.serial || '');
     }
 
     if (els.viewRuilingVerdict) {

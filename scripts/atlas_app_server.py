@@ -5,6 +5,7 @@ Local Atlas app server:
 - Exposes GET /health for health checks
 - Exposes POST /api/ruilings/add for one-click ruiling add from UI
 - Exposes POST /api/ruilings/edit for in-place ruiling edits from UI
+- Exposes POST /api/ruilings/delete for deletion from UI
 - Exposes POST /api/ruilings/search for Gemini-powered semantic search
 - Persists via GitHub Contents API when GITHUB_* env vars are configured
 """
@@ -25,6 +26,7 @@ from urllib.parse import urlparse
 from add_ruiling_with_llm import (
     DEFAULT_DB_PATH,
     add_ruiling_to_payload,
+    delete_ruiling_from_payload,
     update_ruiling_in_payload,
 )
 from gemini_client import call_gemini_json, load_gemini_api_key
@@ -308,6 +310,9 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ruilings/edit":
             self._handle_edit_ruiling()
             return
+        if parsed.path == "/api/ruilings/delete":
+            self._handle_delete_ruiling()
+            return
         if parsed.path == "/api/ruilings/search":
             self._handle_semantic_search()
             return
@@ -489,6 +494,74 @@ class AtlasHandler(SimpleHTTPRequestHandler):
             {
                 "ok": True,
                 "entry": result.get("entry"),
+                "serial": result.get("serial"),
+                "totalEntries": result.get("totalEntries"),
+                "meta": result.get("meta"),
+            },
+        )
+
+    def _handle_delete_ruiling(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_json_payload")
+            return
+
+        try:
+            entry_id = int(payload.get("id") or payload.get("serial") or 0)
+        except Exception:  # noqa: BLE001
+            entry_id = 0
+
+        if entry_id <= 0:
+            self._send_error_json(
+                HTTPStatus.BAD_REQUEST,
+                "Required field missing: id.",
+                code="missing_entry_id",
+            )
+            return
+
+        dry_run = bool(payload.get("dryRun"))
+
+        try:
+            with DB_LOCK:
+                db_payload, db_sha = load_db_payload()
+                result = delete_ruiling_from_payload(
+                    db_payload=db_payload,
+                    entry_id=entry_id,
+                )
+                if not dry_run:
+                    removed_entry = result.get("entry") or {}
+                    case_reference = clean(removed_entry.get("caseReference")) or f"entry {entry_id}"
+                    commit_message = build_commit_message(
+                        "Delete",
+                        int(result.get("serial") or entry_id),
+                        case_reference,
+                    )
+                    persist_db_payload(
+                        result["db"],
+                        sha=db_sha,
+                        commit_message=commit_message,
+                    )
+        except ValueError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_delete_request")
+            return
+        except FileNotFoundError as exc:
+            self._send_error_json(HTTPStatus.NOT_FOUND, str(exc), code="db_file_not_found")
+            return
+        except RuntimeError as exc:
+            status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
+            code = "github_persistence_failed" if REPO_STORE else "delete_ruiling_failed"
+            self._send_error_json(status, str(exc), code=code)
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="delete_ruiling_failed")
+            return
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "deletedEntry": result.get("entry"),
                 "serial": result.get("serial"),
                 "totalEntries": result.get("totalEntries"),
                 "meta": result.get("meta"),
