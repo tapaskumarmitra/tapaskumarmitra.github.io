@@ -1,7 +1,7 @@
 {
   "meta": {
     "source": "Untitled spreadsheet - Sheet1.csv",
-    "totalEntries": 131,
+    "totalEntries": 132,
     "categoryCounts": {
       "Civil Procedure & Adjudication": 32,
       "Evidence Law & Trial Proof": 25,
@@ -11,6 +11,7 @@
       "Sexual Offences & Gender Justice": 13,
       "Constitutional Rights in Litigation": 4,
       "Commercial & Financial Litigation": 3,
+      "General Litigation Principles": 1,
       "Legal Method & Professional Conduct": 1
     },
     "subCategoryBreakdown": [
@@ -232,6 +233,11 @@
       {
         "category": "Family & Matrimonial Law",
         "subCategory": "Muslim Women Maintenance Rights & Constitutional Validity of MWPRDA",
+        "count": 1
+      },
+      {
+        "category": "General Litigation Principles",
+        "subCategory": "Test Data (Not Actual)",
         "count": 1
       },
       {
@@ -3131,6 +3137,27 @@
       "advocateNotes": [
         "Do not presume automatic stay of one proceeding because another is pending.",
         "Tailor strategy independently for distinct standards of proof."
+      ]
+    },
+    {
+      "id": 132,
+      "serial": 132,
+      "caseReference": "Test Data (Not Actual)",
+      "issue": "Test Data (Not Actual)",
+      "holding": "Test Data (Not Actual)",
+      "category": "General Litigation Principles",
+      "subCategory": "Test Data (Not Actual)",
+      "court": "Test Data (Not Actual)",
+      "year": 2000,
+      "stage": "Test Data (Not Actual)",
+      "statuteTags": [
+        "Test Data (Not Actual)"
+      ],
+      "advocateNotes": [
+        "Test Data (Not Actual)"
+      ],
+      "relatedDetails": [
+        "Test Data (Not Actual)"
       ]
     }
   ]
