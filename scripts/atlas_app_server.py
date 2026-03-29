@@ -6,6 +6,7 @@ Local Atlas app server:
 - Exposes POST /api/ruilings/add for one-click ruiling add from UI
 - Exposes POST /api/ruilings/edit for in-place ruiling edits from UI
 - Exposes POST /api/ruilings/search for Gemini-powered semantic search
+- Persists via GitHub Contents API when GITHUB_* env vars are configured
 """
 
 from __future__ import annotations
@@ -21,9 +22,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-from add_ruiling_with_llm import DEFAULT_DB_PATH, add_ruiling_to_db, update_ruiling_in_db
+from add_ruiling_with_llm import (
+    DEFAULT_DB_PATH,
+    add_ruiling_to_payload,
+    update_ruiling_in_payload,
+)
 from gemini_client import call_gemini_json, load_gemini_api_key
 from gemini_config import DEFAULT_GEMINI_MODEL
+from github_repo_store import GitHubRepoStore, GitHubRepoStoreConfig
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +60,79 @@ ALLOWED_ORIGINS = parse_allowed_origins()
 
 def clean(value: Any) -> str:
     return str(value or "").strip()
+
+
+def load_repo_store_from_env() -> GitHubRepoStore | None:
+    token = str(os.getenv("GITHUB_TOKEN", "") or "").strip()
+    owner = str(os.getenv("GITHUB_OWNER", "") or "").strip()
+    repo = str(os.getenv("GITHUB_REPO", "") or "").strip()
+    branch = str(os.getenv("GITHUB_BRANCH", "main") or "").strip() or "main"
+    data_path = str(os.getenv("GITHUB_DATA_PATH", "assets/data/ruilings.json") or "").strip()
+    data_path = data_path.lstrip("/") or "assets/data/ruilings.json"
+
+    filled = [bool(token), bool(owner), bool(repo)]
+    if any(filled) and not all(filled):
+        raise RuntimeError(
+            "Partial GitHub persistence configuration. Set GITHUB_TOKEN, GITHUB_OWNER, and GITHUB_REPO together."
+        )
+    if not all(filled):
+        return None
+
+    timeout_raw = str(os.getenv("GITHUB_TIMEOUT_SECONDS", "30") or "").strip() or "30"
+    try:
+        timeout = int(timeout_raw)
+    except Exception:  # noqa: BLE001
+        timeout = 30
+    timeout = max(5, min(timeout, 120))
+
+    return GitHubRepoStore(
+        GitHubRepoStoreConfig(
+            token=token,
+            owner=owner,
+            repo=repo,
+            branch=branch,
+            data_path=data_path,
+            timeout=timeout,
+        )
+    )
+
+
+REPO_STORE = load_repo_store_from_env()
+PERSISTENCE_MODE = "github" if REPO_STORE else "local_file"
+PERSISTENCE_DATA_PATH = REPO_STORE.config.data_path if REPO_STORE else str(DEFAULT_DB_PATH)
+
+
+def load_db_payload() -> tuple[Dict[str, Any], str | None]:
+    if REPO_STORE:
+        payload, sha = REPO_STORE.read_json_file()
+        return payload, sha
+
+    path = Path(DEFAULT_DB_PATH)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("Invalid database structure: root JSON object missing.")
+    return raw, None
+
+
+def persist_db_payload(payload: Dict[str, Any], *, sha: str | None, commit_message: str) -> None:
+    if REPO_STORE:
+        if not sha:
+            raise RuntimeError("Missing GitHub file SHA for repository update.")
+        REPO_STORE.write_json_file(content=payload, sha=sha, commit_message=commit_message)
+        return
+
+    path = Path(DEFAULT_DB_PATH)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def build_commit_message(action: str, serial: int, case_reference: str) -> str:
+    head = clean(action) or "Update"
+    ref = clean(case_reference)
+    if len(ref) > 96:
+        ref = f"{ref[:93].rstrip()}..."
+    if ref:
+        return f"{head} ruiling #{serial}: {ref}"
+    return f"{head} ruiling #{serial}"
 
 
 def clean_list(values: Any, *, max_items: int = 6, max_len: int = 70) -> List[str]:
@@ -191,6 +270,9 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     "ok": True,
                     "service": "atlas-app-server",
                     "status": "healthy",
+                    "persistenceMode": PERSISTENCE_MODE,
+                    "dataPath": PERSISTENCE_DATA_PATH,
+                    "githubConfigured": bool(REPO_STORE),
                 },
             )
             return
@@ -272,7 +354,9 @@ class AtlasHandler(SimpleHTTPRequestHandler):
 
         try:
             with DB_LOCK:
-                result = add_ruiling_to_db(
+                db_payload, db_sha = load_db_payload()
+                result = add_ruiling_to_payload(
+                    db_payload=db_payload,
                     case_reference=case_reference,
                     verdict=verdict,
                     impact=impact,
@@ -280,8 +364,29 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     gemini_api_key=gemini_api_key,
                     optional_fields=optional_fields,
                     allow_llm_fallback=allow_llm_fallback,
-                    dry_run=dry_run,
                 )
+                if not dry_run:
+                    commit_message = build_commit_message(
+                        "Add",
+                        int(result.get("serial") or 0),
+                        case_reference,
+                    )
+                    persist_db_payload(
+                        result["db"],
+                        sha=db_sha,
+                        commit_message=commit_message,
+                    )
+        except ValueError as exc:
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_add_request")
+            return
+        except FileNotFoundError as exc:
+            self._send_error_json(HTTPStatus.NOT_FOUND, str(exc), code="db_file_not_found")
+            return
+        except RuntimeError as exc:
+            status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
+            code = "github_persistence_failed" if REPO_STORE else "add_ruiling_failed"
+            self._send_error_json(status, str(exc), code=code)
+            return
         except Exception as exc:  # noqa: BLE001
             self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="add_ruiling_failed")
             return
@@ -344,19 +449,36 @@ class AtlasHandler(SimpleHTTPRequestHandler):
 
         try:
             with DB_LOCK:
-                result = update_ruiling_in_db(
+                db_payload, db_sha = load_db_payload()
+                result = update_ruiling_in_payload(
+                    db_payload=db_payload,
                     entry_id=entry_id,
                     case_reference=case_reference,
                     verdict=verdict,
                     impact=impact,
                     optional_fields=optional_fields,
-                    dry_run=dry_run,
                 )
+                if not dry_run:
+                    commit_message = build_commit_message(
+                        "Edit",
+                        int(result.get("serial") or entry_id),
+                        case_reference,
+                    )
+                    persist_db_payload(
+                        result["db"],
+                        sha=db_sha,
+                        commit_message=commit_message,
+                    )
         except ValueError as exc:
             self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_edit_request")
             return
         except FileNotFoundError as exc:
             self._send_error_json(HTTPStatus.NOT_FOUND, str(exc), code="db_file_not_found")
+            return
+        except RuntimeError as exc:
+            status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
+            code = "github_persistence_failed" if REPO_STORE else "edit_ruiling_failed"
+            self._send_error_json(status, str(exc), code=code)
             return
         except Exception as exc:  # noqa: BLE001
             self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="edit_ruiling_failed")
@@ -395,9 +517,11 @@ class AtlasHandler(SimpleHTTPRequestHandler):
 
         try:
             with DB_LOCK:
-                raw = json.loads(Path(DEFAULT_DB_PATH).read_text(encoding="utf-8"))
+                raw, _ = load_db_payload()
         except Exception as exc:  # noqa: BLE001
-            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="db_read_failed")
+            status = HTTPStatus.BAD_GATEWAY if REPO_STORE else HTTPStatus.INTERNAL_SERVER_ERROR
+            code = "github_read_failed" if REPO_STORE else "db_read_failed"
+            self._send_error_json(status, str(exc), code=code)
             return
 
         entries = raw.get("entries", [])
@@ -541,6 +665,7 @@ def main() -> None:
     print(f"Atlas app server running at http://{host}:{port}")
     print(f"Open http://{host}:{port}/ruilings")
     print(f"Health check: http://{host}:{port}/health")
+    print(f"Persistence mode: {PERSISTENCE_MODE} ({PERSISTENCE_DATA_PATH})")
     if ALLOWED_ORIGINS:
         print(f"CORS allowlist active: {', '.join(sorted(ALLOWED_ORIGINS))}")
     else:

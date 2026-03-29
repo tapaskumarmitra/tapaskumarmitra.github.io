@@ -3,6 +3,7 @@
 (function initRuilingsPage() {
   const DATA_URL = '/assets/data/ruilings.json';
   const RELATED_DATA_URL = '/assets/data/ruilings_related_llm.json';
+  const API_BASE = String(window.ATLAS_API_BASE || '').trim().replace(/\/+$/, '');
   const LOCAL_DRAFT_STORAGE_KEY = 'atlasRuilingsDraftEntriesV1';
   const DEFAULT_NOTES = [
     'Align this citation with factual matrix and stage before relying in court.',
@@ -94,6 +95,14 @@
 
   loadData();
   bindEvents();
+
+  function apiPath(path) {
+    const normalizedPath = String(path || '').trim();
+    if (!normalizedPath) {
+      return normalizedPath;
+    }
+    return API_BASE ? `${API_BASE}${normalizedPath}` : normalizedPath;
+  }
 
   async function loadData() {
     try {
@@ -461,7 +470,7 @@
       'info'
     );
 
-    const endpoint = isEdit ? '/api/ruilings/edit' : '/api/ruilings/add';
+    const endpoint = apiPath(isEdit ? '/api/ruilings/edit' : '/api/ruilings/add');
     let apiError = null;
 
     try {
@@ -572,7 +581,7 @@
     applyFiltersAndRender();
 
     try {
-      const response = await fetch('/api/ruilings/search', {
+      const response = await fetch(apiPath('/api/ruilings/search'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

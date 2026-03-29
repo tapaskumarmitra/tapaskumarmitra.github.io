@@ -345,17 +345,29 @@ def apply_optional_overrides(entry: Dict[str, Any], overrides: Dict[str, Any]) -
     return out
 
 
-def add_ruiling_to_db(
+def _validate_db_payload(db_payload: Dict[str, Any]) -> tuple[list[Dict[str, Any]], str]:
+    if not isinstance(db_payload, dict):
+        raise ValueError("Invalid database payload: object expected.")
+
+    entries = db_payload.get("entries", [])
+    if not isinstance(entries, list):
+        raise ValueError("Invalid database payload: `entries` must be a list.")
+
+    source = db_payload.get("meta", {}).get("source", "Untitled spreadsheet - Sheet1.csv")
+    source = clean(source) or "Untitled spreadsheet - Sheet1.csv"
+    return entries, source
+
+
+def add_ruiling_to_payload(
     *,
+    db_payload: Dict[str, Any],
     case_reference: str,
     verdict: str,
     impact: str,
     model: str,
-    data_file: str | Path = DEFAULT_DB_PATH,
     gemini_api_key: str = "",
     optional_fields: Dict[str, Any] | None = None,
     allow_llm_fallback: bool = True,
-    dry_run: bool = False,
 ) -> Dict[str, Any]:
     case_reference = normalize_case_reference_input(case_reference)
     verdict = clean(verdict)
@@ -364,15 +376,7 @@ def add_ruiling_to_db(
     if not case_reference or not verdict or not impact:
         raise ValueError("All required fields are mandatory: case_reference, verdict, impact.")
 
-    data_path = Path(data_file).resolve()
-    if not data_path.exists():
-        raise FileNotFoundError(f"Database file not found: {data_path}")
-
-    raw = json.loads(data_path.read_text(encoding="utf-8"))
-    entries = raw.get("entries", [])
-    if not isinstance(entries, list):
-        raise ValueError("Invalid data file format: `entries` must be a list.")
-
+    entries, source = _validate_db_payload(db_payload)
     serial = max((int(item.get("serial", 0)) for item in entries), default=0) + 1
 
     api_key = load_gemini_api_key(gemini_api_key)
@@ -409,35 +413,29 @@ def add_ruiling_to_db(
     if llm_failed:
         entry["llmFallbackUsed"] = True
 
-    result = {
+    updated_entries = [*entries, entry]
+    meta = recompute_meta(updated_entries, source=source)
+    updated_db = dict(db_payload)
+    updated_db["meta"] = meta
+    updated_db["entries"] = updated_entries
+
+    return {
+        "db": updated_db,
         "entry": entry,
         "serial": serial,
-        "path": str(data_path),
+        "meta": meta,
+        "totalEntries": len(updated_entries),
     }
 
-    if dry_run:
-        return result
 
-    entries.append(entry)
-    source = raw.get("meta", {}).get("source", "Untitled spreadsheet - Sheet1.csv")
-    meta = recompute_meta(entries, source=source)
-    updated = {"meta": meta, "entries": entries}
-    data_path.write_text(json.dumps(updated, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    result["meta"] = meta
-    result["totalEntries"] = len(entries)
-    return result
-
-
-def update_ruiling_in_db(
+def update_ruiling_in_payload(
     *,
+    db_payload: Dict[str, Any],
     entry_id: int,
     case_reference: str,
     verdict: str,
     impact: str,
-    data_file: str | Path = DEFAULT_DB_PATH,
     optional_fields: Dict[str, Any] | None = None,
-    dry_run: bool = False,
 ) -> Dict[str, Any]:
     case_reference = normalize_case_reference_input(case_reference)
     verdict = clean(verdict)
@@ -448,14 +446,7 @@ def update_ruiling_in_db(
     if not case_reference or not verdict or not impact:
         raise ValueError("All required fields are mandatory: case_reference, verdict, impact.")
 
-    data_path = Path(data_file).resolve()
-    if not data_path.exists():
-        raise FileNotFoundError(f"Database file not found: {data_path}")
-
-    raw = json.loads(data_path.read_text(encoding="utf-8"))
-    entries = raw.get("entries", [])
-    if not isinstance(entries, list):
-        raise ValueError("Invalid data file format: `entries` must be a list.")
+    entries, source = _validate_db_payload(db_payload)
 
     match_index = -1
     for idx, item in enumerate(entries):
@@ -495,27 +486,103 @@ def update_ruiling_in_db(
     while len(notes) < 2:
         notes.append("Apply this citation only after matching facts and statutory context.")
     updated["advocateNotes"] = notes[:5]
-
     updated["relatedDetails"] = safe_str_list(updated.get("relatedDetails"), max_len=8)
 
-    result = {
+    updated_entries = list(entries)
+    updated_entries[match_index] = updated
+    meta = recompute_meta(updated_entries, source=source)
+
+    updated_db = dict(db_payload)
+    updated_db["meta"] = meta
+    updated_db["entries"] = updated_entries
+
+    return {
+        "db": updated_db,
         "entry": updated,
         "serial": serial,
+        "meta": meta,
+        "totalEntries": len(updated_entries),
+    }
+
+
+def add_ruiling_to_db(
+    *,
+    case_reference: str,
+    verdict: str,
+    impact: str,
+    model: str,
+    data_file: str | Path = DEFAULT_DB_PATH,
+    gemini_api_key: str = "",
+    optional_fields: Dict[str, Any] | None = None,
+    allow_llm_fallback: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    data_path = Path(data_file).resolve()
+    if not data_path.exists():
+        raise FileNotFoundError(f"Database file not found: {data_path}")
+
+    raw = json.loads(data_path.read_text(encoding="utf-8"))
+    result = add_ruiling_to_payload(
+        db_payload=raw,
+        case_reference=case_reference,
+        verdict=verdict,
+        impact=impact,
+        model=model,
+        gemini_api_key=gemini_api_key,
+        optional_fields=optional_fields,
+        allow_llm_fallback=allow_llm_fallback,
+    )
+    response = {
+        "entry": result["entry"],
+        "serial": result["serial"],
         "path": str(data_path),
     }
 
     if dry_run:
-        return result
+        return response
 
-    entries[match_index] = updated
-    source = raw.get("meta", {}).get("source", "Untitled spreadsheet - Sheet1.csv")
-    meta = recompute_meta(entries, source=source)
-    updated_db = {"meta": meta, "entries": entries}
-    data_path.write_text(json.dumps(updated_db, indent=2, ensure_ascii=False), encoding="utf-8")
+    data_path.write_text(json.dumps(result["db"], indent=2, ensure_ascii=False), encoding="utf-8")
+    response["meta"] = result["meta"]
+    response["totalEntries"] = result["totalEntries"]
+    return response
 
-    result["meta"] = meta
-    result["totalEntries"] = len(entries)
-    return result
+
+def update_ruiling_in_db(
+    *,
+    entry_id: int,
+    case_reference: str,
+    verdict: str,
+    impact: str,
+    data_file: str | Path = DEFAULT_DB_PATH,
+    optional_fields: Dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    data_path = Path(data_file).resolve()
+    if not data_path.exists():
+        raise FileNotFoundError(f"Database file not found: {data_path}")
+
+    raw = json.loads(data_path.read_text(encoding="utf-8"))
+    result = update_ruiling_in_payload(
+        db_payload=raw,
+        entry_id=entry_id,
+        case_reference=case_reference,
+        verdict=verdict,
+        impact=impact,
+        optional_fields=optional_fields,
+    )
+    response = {
+        "entry": result["entry"],
+        "serial": result["serial"],
+        "path": str(data_path),
+    }
+
+    if dry_run:
+        return response
+
+    data_path.write_text(json.dumps(result["db"], indent=2, ensure_ascii=False), encoding="utf-8")
+    response["meta"] = result["meta"]
+    response["totalEntries"] = result["totalEntries"]
+    return response
 
 
 def parse_args() -> argparse.Namespace:
