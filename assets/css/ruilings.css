@@ -748,6 +748,18 @@ body.topbar-collapsed .filters-toolbar {
   background: #dbeafe;
 }
 
+.delete-btn {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.delete-btn:hover {
+  border-color: #fca5a5;
+  color: #991b1b;
+  background: #fee2e2;
+}
+
 .view-ruiling-dialog {
   max-width: min(1420px, 96vw);
 }

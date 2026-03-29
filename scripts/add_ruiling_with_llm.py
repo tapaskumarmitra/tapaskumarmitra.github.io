@@ -505,6 +505,46 @@ def update_ruiling_in_payload(
     }
 
 
+def delete_ruiling_from_payload(
+    *,
+    db_payload: Dict[str, Any],
+    entry_id: int,
+) -> Dict[str, Any]:
+    if entry_id <= 0:
+        raise ValueError("entry_id must be a positive integer.")
+
+    entries, source = _validate_db_payload(db_payload)
+    if not entries:
+        raise ValueError("No entries available to delete.")
+
+    match_index = -1
+    for idx, item in enumerate(entries):
+        item_id = int(item.get("id") or item.get("serial") or 0)
+        if item_id == entry_id:
+            match_index = idx
+            break
+
+    if match_index < 0:
+        raise ValueError(f"Entry not found for id/serial: {entry_id}")
+
+    removed_entry = dict(entries[match_index])
+    serial = int(removed_entry.get("serial") or removed_entry.get("id") or entry_id)
+    updated_entries = [item for idx, item in enumerate(entries) if idx != match_index]
+
+    meta = recompute_meta(updated_entries, source=source)
+    updated_db = dict(db_payload)
+    updated_db["meta"] = meta
+    updated_db["entries"] = updated_entries
+
+    return {
+        "db": updated_db,
+        "entry": removed_entry,
+        "serial": serial,
+        "meta": meta,
+        "totalEntries": len(updated_entries),
+    }
+
+
 def add_ruiling_to_db(
     *,
     case_reference: str,
@@ -569,6 +609,36 @@ def update_ruiling_in_db(
         verdict=verdict,
         impact=impact,
         optional_fields=optional_fields,
+    )
+    response = {
+        "entry": result["entry"],
+        "serial": result["serial"],
+        "path": str(data_path),
+    }
+
+    if dry_run:
+        return response
+
+    data_path.write_text(json.dumps(result["db"], indent=2, ensure_ascii=False), encoding="utf-8")
+    response["meta"] = result["meta"]
+    response["totalEntries"] = result["totalEntries"]
+    return response
+
+
+def delete_ruiling_from_db(
+    *,
+    entry_id: int,
+    data_file: str | Path = DEFAULT_DB_PATH,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    data_path = Path(data_file).resolve()
+    if not data_path.exists():
+        raise FileNotFoundError(f"Database file not found: {data_path}")
+
+    raw = json.loads(data_path.read_text(encoding="utf-8"))
+    result = delete_ruiling_from_payload(
+        db_payload=raw,
+        entry_id=entry_id,
     )
     response = {
         "entry": result["entry"],
