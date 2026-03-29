@@ -4,6 +4,9 @@
   const DATA_URL = '/assets/data/ruilings.json';
   const RELATED_DATA_URL = '/assets/data/ruilings_related_llm.json';
   const API_BASE = String(window.ATLAS_API_BASE || '').trim().replace(/\/+$/, '');
+  const API_WAKE_RETRY_INITIAL_TIMEOUT_MS = 12000;
+  const API_WAKE_RETRY_TIMEOUT_MS = 70000;
+  const WAKEUP_TOAST_COOLDOWN_MS = 120000;
   const LOCAL_DRAFT_STORAGE_KEY = 'atlasRuilingsDraftEntriesV1';
   const DEFAULT_NOTES = [
     'Align this citation with factual matrix and stage before relying in court.',
@@ -89,6 +92,7 @@
   let addModalInstance = null;
   let addFormMode = 'add';
   let editingEntryId = null;
+  let lastWakeupToastAt = 0;
 
   if (!els.cardsGrid) {
     return;
@@ -496,19 +500,11 @@
     let apiError = null;
 
     try {
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const { body } = await postJsonApiWithWakeRetry({
+        endpoint,
+        payload,
+        actionLabel: isEdit ? 'saving this ruiling' : 'adding this ruiling',
       });
-
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body?.ok) {
-        const message = String(body?.error || '').trim() || `Could not ${isEdit ? 'save' : 'add'} ruiling right now.`;
-        const err = new Error(message);
-        err.status = response.status;
-        throw err;
-      }
 
       if (body.entry) {
         const savedEntry = { ...body.entry, localDraft: false };
@@ -599,19 +595,11 @@
     let apiError = null;
 
     try {
-      const response = await fetch(apiPath('/api/ruilings/delete'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id: entryId }),
+      const { body } = await postJsonApiWithWakeRetry({
+        endpoint: apiPath('/api/ruilings/delete'),
+        payload: { id: entryId },
+        actionLabel: 'deleting this ruiling',
       });
-
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || !body?.ok) {
-        const message = String(body?.error || '').trim() || 'Could not delete ruiling right now.';
-        const err = new Error(message);
-        err.status = response.status;
-        throw err;
-      }
 
       removeEntryFromState(entryId);
       removeLocalDraftEntry(entryId);
@@ -718,6 +706,9 @@
         return;
       }
       console.warn('LLM semantic search unavailable, using keyword mode.', error);
+      if (isLikelyColdStartError(error)) {
+        notifyServerWakeup('AI search ranking');
+      }
       state.llmSearch.status = 'error';
       state.llmSearch.query = normalizedQuery;
       state.llmSearch.rankedIds = [];
@@ -1830,6 +1821,107 @@
       }
     });
     return out.slice(0, maxLen);
+  }
+
+  function isLikelyColdStartError(error) {
+    if (!API_BASE) {
+      return false;
+    }
+    const status = Number(error?.status || 0);
+    if (status === 408 || status === 429 || status === 502 || status === 503 || status === 504) {
+      return true;
+    }
+
+    if (String(error?.name || '').toLowerCase() === 'aborterror') {
+      return true;
+    }
+
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('failed to fetch')
+      || message.includes('networkerror')
+      || message.includes('load failed')
+      || message.includes('network request failed')
+      || message.includes('request timeout')
+      || message.includes('timeout')
+      || message.includes('timed out')
+    );
+  }
+
+  function notifyServerWakeup(actionLabel) {
+    if (!API_BASE) {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastWakeupToastAt < WAKEUP_TOAST_COOLDOWN_MS) {
+      return;
+    }
+    lastWakeupToastAt = now;
+
+    const action = oneLine(actionLabel || 'this action');
+    showToast(
+      'Server Waking Up',
+      `The secure server is starting. ${action} may take up to 50 seconds on first request.`,
+      'warning'
+    );
+  }
+
+  async function fetchWithTimeout(url, init, timeoutMs) {
+    const controller = new AbortController();
+    const timeout = Number(timeoutMs || 0);
+    const timer = timeout > 0
+      ? window.setTimeout(() => controller.abort(), timeout)
+      : null;
+
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (String(error?.name || '').toLowerCase() === 'aborterror') {
+        const timeoutError = new Error('Request timeout while waiting for server response.');
+        timeoutError.name = 'RequestTimeout';
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+    }
+  }
+
+  async function postJsonApi(endpoint, payload, timeoutMs) {
+    const response = await fetchWithTimeout(
+      endpoint,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      },
+      timeoutMs
+    );
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body?.ok) {
+      const message = String(body?.error || '').trim() || 'Request failed.';
+      const err = new Error(message);
+      err.status = response.status;
+      throw err;
+    }
+
+    return { response, body };
+  }
+
+  async function postJsonApiWithWakeRetry({ endpoint, payload, actionLabel }) {
+    try {
+      return await postJsonApi(endpoint, payload, API_WAKE_RETRY_INITIAL_TIMEOUT_MS);
+    } catch (firstError) {
+      if (!isLikelyColdStartError(firstError)) {
+        throw firstError;
+      }
+
+      notifyServerWakeup(actionLabel);
+      return postJsonApi(endpoint, payload, API_WAKE_RETRY_TIMEOUT_MS);
+    }
   }
 
   function shortUrl(url) {
