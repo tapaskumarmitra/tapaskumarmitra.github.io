@@ -3,6 +3,11 @@
 (function initRuilingsPage() {
   const DATA_URL = '/assets/data/ruilings.json';
   const RELATED_DATA_URL = '/assets/data/ruilings_related_llm.json';
+  const LOCAL_DRAFT_STORAGE_KEY = 'atlasRuilingsDraftEntriesV1';
+  const DEFAULT_NOTES = [
+    'Align this citation with factual matrix and stage before relying in court.',
+    'Pair this with current binding precedent from the same jurisdiction.',
+  ];
 
   const state = {
     entries: [],
@@ -70,11 +75,18 @@
     viewRuilingRelatedHint: document.getElementById('viewRuilingRelatedHint'),
     viewRuilingRelatedList: document.getElementById('viewRuilingRelatedList'),
     copyViewCitation: document.getElementById('copyViewCitation'),
+    editViewRuiling: document.getElementById('editViewRuiling'),
+    openAddRuilingBtn: document.getElementById('openAddRuilingBtn'),
+    addRuilingModalLabel: document.getElementById('addRuilingModalLabel'),
+    addModeBadge: document.getElementById('addModeBadge'),
+    addModalHelpText: document.getElementById('addModalHelpText'),
   };
 
   let viewModalInstance = null;
   let currentViewEntry = null;
   let addModalInstance = null;
+  let addFormMode = 'add';
+  let editingEntryId = null;
 
   if (!els.cardsGrid) {
     return;
@@ -104,31 +116,16 @@
         state.relatedMap = {};
       }
 
-      state.entries = (payload.entries || []).map((entry) => {
-        const normalizedTags = dedupeTags(entry.statuteTags || []);
-        const searchable = [
-          entry.caseReference,
-          entry.issue,
-          entry.holding,
-          entry.category,
-          entry.subCategory,
-          entry.court,
-          entry.stage,
-          normalizedTags.join(' '),
-        ]
-          .join(' ')
-          .toLowerCase();
-
-        return {
-          ...entry,
-          statuteTags: normalizedTags,
-          searchable,
-        };
-      });
+      state.entries = (payload.entries || []).map((entry) => normalizeEntryForState(entry));
 
       state.entriesById = new Map(
         state.entries.map((entry) => [Number(entry.id || entry.serial), entry])
       );
+
+      const localDrafts = readLocalDraftEntries();
+      localDrafts.forEach((entry) => {
+        upsertEntryInState({ ...entry, localDraft: true });
+      });
 
       populateGlobalFilters();
       renderHeroStats();
@@ -216,6 +213,13 @@
         return;
       }
 
+      const editButton = event.target.closest('button[data-edit-id]');
+      if (editButton) {
+        const entryId = Number(editButton.dataset.editId || 0);
+        openEditRuilingForm(entryId);
+        return;
+      }
+
       const copyButton = event.target.closest('button[data-copy-ref]');
       if (copyButton) {
         const citation = copyButton.dataset.copyRef || '';
@@ -281,6 +285,13 @@
           return;
         }
 
+        const editButton = event.target.closest('button[data-edit-entry-id]');
+        if (editButton) {
+          const entryId = Number(editButton.dataset.editEntryId || 0);
+          openEditRuilingForm(entryId);
+          return;
+        }
+
         const copyButton = event.target.closest('button[data-copy-ref]');
         if (!copyButton) {
           return;
@@ -316,63 +327,223 @@
       });
     }
 
+    if (els.editViewRuiling) {
+      els.editViewRuiling.addEventListener('click', () => {
+        const entryId = Number(currentViewEntry?.id || currentViewEntry?.serial || 0);
+        openEditRuilingForm(entryId);
+      });
+    }
+
     if (els.addRuilingModal && window.bootstrap?.Modal) {
       addModalInstance = new window.bootstrap.Modal(els.addRuilingModal);
+      els.addRuilingModal.addEventListener('hidden.bs.modal', () => {
+        switchAddFormMode('add');
+      });
+    }
+
+    if (els.openAddRuilingBtn) {
+      els.openAddRuilingBtn.addEventListener('click', () => {
+        switchAddFormMode('add');
+      });
     }
 
     if (els.submitAddRuiling) {
-      els.submitAddRuiling.addEventListener('click', async () => {
-        const caseReference = (els.newCaseReference?.value || '').trim();
-        const verdict = (els.newVerdict?.value || '').trim();
-        const impact = (els.newImpact?.value || '').trim();
+      els.submitAddRuiling.addEventListener('click', submitRuilingForm);
+    }
+  }
 
-        if (!caseReference || !verdict || !impact) {
-          showToast('Required fields missing', 'Please fill Sl no./Case Reference, Verdict, and Impact.', 'warning');
-          return;
-        }
+  function switchAddFormMode(mode, entry) {
+    const resolvedMode = mode === 'edit' ? 'edit' : 'add';
+    addFormMode = resolvedMode;
+    editingEntryId = resolvedMode === 'edit' ? Number(entry?.id || entry?.serial || 0) : null;
 
-        const payload = buildAddPayload(caseReference, verdict, impact);
-        const addBtn = els.submitAddRuiling;
-        const previousLabel = addBtn.textContent;
-        addBtn.disabled = true;
-        addBtn.textContent = 'Adding...';
-        showToast('Adding ruiling', 'Ruiling is being processed and added to Atlas.', 'info');
+    if (els.addRuilingModalLabel) {
+      els.addRuilingModalLabel.textContent = resolvedMode === 'edit' ? 'Edit Ruiling' : 'Add Ruiling';
+    }
 
-        try {
-          const response = await fetch('/api/ruilings/add', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
+    if (els.addModeBadge) {
+      els.addModeBadge.textContent = resolvedMode === 'edit' ? 'Edit Mode' : 'Add Mode';
+      els.addModeBadge.classList.toggle('is-edit', resolvedMode === 'edit');
+    }
 
-          const body = await response.json().catch(() => ({}));
-          if (!response.ok || !body?.ok) {
-            throw new Error('Could not add ruiling right now.');
-          }
+    if (els.addModalHelpText) {
+      els.addModalHelpText.innerHTML = resolvedMode === 'edit'
+        ? 'Update the fields and click <strong>Save Changes</strong>. Atlas will retain your existing structure and refresh this entry.'
+        : 'Enter 3 required fields and click <strong>Add Ruiling</strong>. Atlas will process the rest automatically.';
+    }
 
-          if (body.entry) {
-            upsertEntryInState(body.entry);
-            if (body.meta) {
-              state.meta = body.meta;
-            }
-            populateGlobalFilters();
-            renderHeroStats();
-            applyFiltersAndRender();
-          }
+    if (els.submitAddRuiling) {
+      els.submitAddRuiling.innerHTML = resolvedMode === 'edit'
+        ? '<i class="bi bi-check2-circle" aria-hidden="true"></i> Save Changes'
+        : '<i class="bi bi-plus-circle" aria-hidden="true"></i> Add Ruiling';
+    }
 
-          resetAddForm();
-          if (addModalInstance) {
-            addModalInstance.hide();
-          }
-          showToast('Ruiling Added', `Entry #${body.serial || ''} added successfully.`, 'success');
-        } catch (error) {
-          console.error(error);
-          showToast('Add Failed', 'Could not add right now. Please try again.', 'danger');
-        } finally {
-          addBtn.disabled = false;
-          addBtn.textContent = previousLabel || 'Add Ruiling';
-        }
+    if (resolvedMode === 'edit' && entry) {
+      fillAddFormFromEntry(entry);
+    } else {
+      resetAddForm();
+    }
+  }
+
+  function fillAddFormFromEntry(entry) {
+    if (!entry) {
+      return;
+    }
+
+    if (els.newCaseReference) els.newCaseReference.value = entry.caseReference || '';
+    if (els.newVerdict) els.newVerdict.value = entry.issue || '';
+    if (els.newImpact) els.newImpact.value = entry.holding || '';
+    if (els.optionalCategory) els.optionalCategory.value = entry.category || '';
+    if (els.optionalSubCategory) els.optionalSubCategory.value = entry.subCategory || '';
+    if (els.optionalStage) els.optionalStage.value = entry.stage || '';
+    if (els.optionalCourt) els.optionalCourt.value = entry.court || '';
+    if (els.optionalYear) els.optionalYear.value = entry.year ? String(entry.year) : '';
+    if (els.optionalStatuteTags) els.optionalStatuteTags.value = Array.isArray(entry.statuteTags) ? entry.statuteTags.join(', ') : '';
+    if (els.optionalAdvocateNotes) els.optionalAdvocateNotes.value = Array.isArray(entry.advocateNotes) ? entry.advocateNotes.join('\n') : '';
+    if (els.optionalRelatedDetails) els.optionalRelatedDetails.value = Array.isArray(entry.relatedDetails) ? entry.relatedDetails.join('\n') : '';
+  }
+
+  function openEditRuilingForm(entryId) {
+    if (!Number.isFinite(entryId) || entryId <= 0) {
+      return;
+    }
+
+    const entry = state.entriesById.get(entryId);
+    if (!entry) {
+      showToast('Not found', 'Could not find this ruiling to edit.', 'warning');
+      return;
+    }
+
+    switchAddFormMode('edit', entry);
+
+    if (!addModalInstance) {
+      return;
+    }
+
+    if (viewModalInstance && els.viewRuilingModal?.classList.contains('show')) {
+      viewModalInstance.hide();
+      window.setTimeout(() => {
+        addModalInstance.show();
+      }, 180);
+      return;
+    }
+
+    addModalInstance.show();
+  }
+
+  async function submitRuilingForm() {
+    const caseReference = (els.newCaseReference?.value || '').trim();
+    const verdict = (els.newVerdict?.value || '').trim();
+    const impact = (els.newImpact?.value || '').trim();
+
+    if (!caseReference || !verdict || !impact) {
+      showToast('Required fields missing', 'Please fill Case Reference / Case Number, Verdict, and Impact.', 'warning');
+      return;
+    }
+
+    const isEdit = addFormMode === 'edit' && Number.isFinite(editingEntryId) && editingEntryId > 0;
+    const payload = buildAddPayload(caseReference, verdict, impact);
+    if (isEdit) {
+      payload.id = editingEntryId;
+    }
+
+    const submitBtn = els.submitAddRuiling;
+    const previousHtml = submitBtn?.innerHTML || '';
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = isEdit ? 'Saving...' : 'Adding...';
+    }
+    showToast(
+      isEdit ? 'Saving ruiling' : 'Adding ruiling',
+      isEdit
+        ? 'Your updates are being processed.'
+        : 'Ruiling is being processed and added to Atlas.',
+      'info'
+    );
+
+    const endpoint = isEdit ? '/api/ruilings/edit' : '/api/ruilings/add';
+    let apiError = null;
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
       });
+
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok || !body?.ok) {
+        const message = String(body?.error || '').trim() || `Could not ${isEdit ? 'save' : 'add'} ruiling right now.`;
+        const err = new Error(message);
+        err.status = response.status;
+        throw err;
+      }
+
+      if (body.entry) {
+        const savedEntry = { ...body.entry, localDraft: false };
+        upsertEntryInState(savedEntry);
+        removeLocalDraftEntry(Number(savedEntry.id || savedEntry.serial));
+        if (body.meta) {
+          state.meta = body.meta;
+        }
+        populateGlobalFilters();
+        renderHeroStats();
+        applyFiltersAndRender();
+      }
+
+      resetAddForm();
+      switchAddFormMode('add');
+      if (addModalInstance) {
+        addModalInstance.hide();
+      }
+      showToast(
+        isEdit ? 'Ruiling Saved' : 'Ruiling Added',
+        `Entry #${body.serial || ''} ${isEdit ? 'updated' : 'added'} successfully.`,
+        'success'
+      );
+      return;
+    } catch (error) {
+      apiError = error;
+      if (!shouldUseLocalDraftFallback(error)) {
+        console.error(error);
+        showToast(isEdit ? 'Save Failed' : 'Add Failed', String(error?.message || 'Could not save right now.'), 'danger');
+        return;
+      }
+    } finally {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = previousHtml || (isEdit ? 'Save Changes' : 'Add Ruiling');
+      }
+    }
+
+    try {
+      const localEntry = isEdit
+        ? buildLocalUpdatedEntry(editingEntryId, payload)
+        : buildLocalAddedEntry(payload);
+
+      if (!localEntry) {
+        throw new Error('Could not prepare local draft entry.');
+      }
+
+      upsertEntryInState(localEntry);
+      persistLocalDraftEntry(localEntry);
+      populateGlobalFilters();
+      renderHeroStats();
+      applyFiltersAndRender();
+      switchAddFormMode('add');
+      resetAddForm();
+      if (addModalInstance) {
+        addModalInstance.hide();
+      }
+
+      showToast(
+        isEdit ? 'Saved Locally' : 'Added Locally',
+        'Live mode does not have write API. Saved in this browser as local draft.',
+        'warning'
+      );
+    } catch (localError) {
+      console.error(apiError || localError);
+      showToast(isEdit ? 'Save Failed' : 'Add Failed', 'Could not save right now. Please try again.', 'danger');
     }
   }
 
@@ -639,9 +810,13 @@
   }
 
   function renderHeroStats() {
-    const totalEntries = state.meta?.totalEntries || state.entries.length;
-    const totalCategories = Object.keys(state.meta?.categoryCounts || {}).length;
-    const totalSubCategories = (state.meta?.subCategoryBreakdown || []).length;
+    const totalEntries = state.entries.length;
+    const totalCategories = uniqueSorted(
+      state.entries.map((entry) => entry.category || 'General Litigation Principles')
+    ).length;
+    const totalSubCategories = new Set(
+      state.entries.map((entry) => `${entry.category || 'General Litigation Principles'}::${entry.subCategory || 'General Litigation Principles'}`)
+    ).size;
     const courtsCovered = uniqueSorted(state.entries.map((entry) => entry.court)).length;
 
     els.statTotalEntries.textContent = String(totalEntries);
@@ -670,6 +845,9 @@
         const taxonomy = `${entry.category || 'General'} \u203a ${entry.subCategory || 'General'}`;
         const primaryNote = safeTextList(entry.advocateNotes || [], 1)[0]
           || 'Match jurisdiction + facts before relying on this authority.';
+        const localBadge = entry.localDraft
+          ? '<span class="ruiling-source-badge">Local Draft</span>'
+          : '';
 
         const sectionAnchors = tags.length
           ? tags
@@ -691,6 +869,7 @@
             </div>
 
             <p class="ruiling-reference">${escapeHtml(entry.caseReference || '')}</p>
+            ${localBadge}
 
             <div class="ruiling-meta">
               <span class="ruiling-meta-item"><i class="bi bi-building me-1" aria-hidden="true"></i>${escapeHtml(entry.court || 'Reported Court')}</span>
@@ -709,6 +888,7 @@
             </div>
 
             <div class="ruiling-card-footer">
+              <button type="button" class="mini-action-btn view-btn" data-edit-id="${Number(entry.id || entry.serial)}">Edit</button>
               <button type="button" class="mini-action-btn" data-copy-ref="${escapeAttribute(entry.caseReference || '')}">Copy Citation</button>
             </div>
           </article>
@@ -923,6 +1103,18 @@
   }
 
   function upsertEntryInState(entry) {
+    const normalized = normalizeEntryForState(entry);
+    const id = Number(normalized.id || normalized.serial);
+    const index = state.entries.findIndex((item) => Number(item.id || item.serial) === id);
+    if (index >= 0) {
+      state.entries[index] = normalized;
+    } else {
+      state.entries.push(normalized);
+    }
+    state.entriesById.set(id, normalized);
+  }
+
+  function normalizeEntryForState(entry) {
     const normalizedTags = dedupeTags(entry.statuteTags || []);
     const searchable = [
       entry.caseReference,
@@ -937,20 +1129,202 @@
       .join(' ')
       .toLowerCase();
 
-    const normalized = {
+    return {
       ...entry,
+      localDraft: Boolean(entry.localDraft),
       statuteTags: normalizedTags,
       searchable,
     };
+  }
 
-    const id = Number(entry.id || entry.serial);
-    const index = state.entries.findIndex((item) => Number(item.id || item.serial) === id);
-    if (index >= 0) {
-      state.entries[index] = normalized;
-    } else {
-      state.entries.push(normalized);
+  function shouldUseLocalDraftFallback(error) {
+    const status = Number(error?.status || 0);
+    if ([0, 404, 405, 501, 502, 503, 504].includes(status)) {
+      return true;
     }
-    state.entriesById.set(id, normalized);
+
+    const message = String(error?.message || '').toLowerCase();
+    return (
+      message.includes('failed to fetch')
+      || message.includes('networkerror')
+      || message.includes('load failed')
+      || message.includes('network request failed')
+    );
+  }
+
+  function buildLocalAddedEntry(payload) {
+    const maxSerial = state.entries.reduce((maxVal, item) => {
+      const serial = Number(item.serial || item.id || 0);
+      return serial > maxVal ? serial : maxVal;
+    }, 0);
+
+    return buildLocalDraftEntry({
+      existingEntry: null,
+      id: maxSerial + 1,
+      payload,
+    });
+  }
+
+  function buildLocalUpdatedEntry(entryId, payload) {
+    const existingEntry = state.entriesById.get(Number(entryId));
+    if (!existingEntry) {
+      return null;
+    }
+
+    return buildLocalDraftEntry({
+      existingEntry,
+      id: Number(existingEntry.id || existingEntry.serial || entryId),
+      payload,
+    });
+  }
+
+  function buildLocalDraftEntry({ existingEntry, id, payload }) {
+    const serial = Number(existingEntry?.serial || id);
+    const caseReference = oneLine(payload.caseReference || existingEntry?.caseReference || '');
+    const issue = oneLine(payload.verdict || existingEntry?.issue || '');
+    const holding = oneLine(payload.impact || existingEntry?.holding || '');
+
+    const yearFromPayload = parseYearValue(payload.year);
+    const inferredYear = inferYearFromCaseReference(caseReference);
+    const resolvedYear = yearFromPayload ?? inferredYear ?? existingEntry?.year ?? null;
+
+    const statuteTags = dedupeTags(
+      Array.isArray(payload.statuteTags) && payload.statuteTags.length
+        ? payload.statuteTags
+        : (existingEntry?.statuteTags || [])
+    );
+    const advocateNotes = safeTextList(
+      Array.isArray(payload.advocateNotes) && payload.advocateNotes.length
+        ? payload.advocateNotes
+        : (existingEntry?.advocateNotes || []),
+      6
+    );
+    const relatedDetails = safeTextList(
+      Array.isArray(payload.relatedDetails) && payload.relatedDetails.length
+        ? payload.relatedDetails
+        : (existingEntry?.relatedDetails || []),
+      8
+    );
+
+    const out = {
+      ...(existingEntry || {}),
+      id,
+      serial,
+      caseReference,
+      issue,
+      holding,
+      category: oneLine(payload.category || existingEntry?.category || 'General Litigation Principles'),
+      subCategory: oneLine(payload.subCategory || existingEntry?.subCategory || 'General Litigation Principles'),
+      stage: oneLine(payload.stage || existingEntry?.stage || 'General'),
+      court: oneLine(payload.court || existingEntry?.court || inferCourtFromCaseReference(caseReference)),
+      year: resolvedYear,
+      statuteTags,
+      advocateNotes: advocateNotes.length ? advocateNotes : [...DEFAULT_NOTES],
+      relatedDetails,
+      localDraft: true,
+      researchSources: Array.isArray(existingEntry?.researchSources) ? existingEntry.researchSources : [],
+    };
+
+    return normalizeEntryForState(out);
+  }
+
+  function parseYearValue(value) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      return null;
+    }
+    if (parsed < 1900 || parsed > 2100) {
+      return null;
+    }
+    return Math.trunc(parsed);
+  }
+
+  function inferYearFromCaseReference(caseReference) {
+    const match = String(caseReference || '').match(/\b(19|20)\d{2}\b/);
+    if (!match) {
+      return null;
+    }
+    const year = Number(match[0]);
+    if (!Number.isFinite(year) || year < 1900 || year > 2100) {
+      return null;
+    }
+    return year;
+  }
+
+  function inferCourtFromCaseReference(caseReference) {
+    const text = String(caseReference || '').toLowerCase();
+    if (!text) {
+      return 'Reported Court (See citation)';
+    }
+    if (text.includes('supreme court') || text.includes(' scc ') || text.includes(' sc ')) {
+      return 'Supreme Court';
+    }
+    if (text.includes('calcutta') || text.includes(' cal ')) {
+      return 'Calcutta High Court';
+    }
+    if (text.includes('high court') || text.includes(' hc ')) {
+      return 'High Court';
+    }
+    return 'Reported Court (See citation)';
+  }
+
+  function readLocalDraftEntries() {
+    try {
+      const raw = window.localStorage?.getItem(LOCAL_DRAFT_STORAGE_KEY);
+      if (!raw) {
+        return [];
+      }
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter((item) => item && typeof item === 'object');
+    } catch (error) {
+      console.warn('Could not read local draft entries.', error);
+      return [];
+    }
+  }
+
+  function writeLocalDraftEntries(entries) {
+    try {
+      window.localStorage?.setItem(LOCAL_DRAFT_STORAGE_KEY, JSON.stringify(entries));
+    } catch (error) {
+      console.warn('Could not write local draft entries.', error);
+    }
+  }
+
+  function persistLocalDraftEntry(entry) {
+    const draftId = Number(entry?.id || entry?.serial || 0);
+    if (!Number.isFinite(draftId) || draftId <= 0) {
+      return;
+    }
+
+    const current = readLocalDraftEntries();
+    const next = [...current];
+    const index = next.findIndex((item) => Number(item?.id || item?.serial || 0) === draftId);
+    if (index >= 0) {
+      next[index] = entry;
+    } else {
+      next.push(entry);
+    }
+    writeLocalDraftEntries(next);
+  }
+
+  function removeLocalDraftEntry(entryId) {
+    const id = Number(entryId || 0);
+    if (!Number.isFinite(id) || id <= 0) {
+      return;
+    }
+    const current = readLocalDraftEntries();
+    const next = current.filter((item) => Number(item?.id || item?.serial || 0) !== id);
+    if (next.length === current.length) {
+      return;
+    }
+    writeLocalDraftEntries(next);
   }
 
   function resetAddForm() {
@@ -1033,7 +1407,12 @@
     }
 
     if (els.viewRuilingMeta) {
-      els.viewRuilingMeta.textContent = `${court} | ${year} | ${stage} | ${category} -> ${subCategory}`;
+      const draftSuffix = entry.localDraft ? ' | Local Draft (browser only)' : '';
+      els.viewRuilingMeta.textContent = `${court} | ${year} | ${stage} | ${category} -> ${subCategory}${draftSuffix}`;
+    }
+
+    if (els.editViewRuiling) {
+      els.editViewRuiling.dataset.editEntryId = String(entry.id || entry.serial || '');
     }
 
     if (els.viewRuilingVerdict) {

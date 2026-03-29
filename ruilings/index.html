@@ -135,7 +135,7 @@
 
             <div class="filter-group filter-group-action">
               <label class="filter-label-spacer" aria-hidden="true">Add</label>
-              <button type="button" class="btn reset-btn add-btn" data-bs-toggle="modal" data-bs-target="#addRuilingModal">
+              <button type="button" id="openAddRuilingBtn" class="btn reset-btn add-btn" data-bs-toggle="modal" data-bs-target="#addRuilingModal">
                 <i class="bi bi-plus-circle" aria-hidden="true"></i>
                 Add Ruiling
               </button>
@@ -227,6 +227,7 @@
         </div>
 
         <div class="modal-footer view-modal-footer">
+          <button type="button" id="editViewRuiling" class="btn mini-action-btn view-btn">Edit Ruiling</button>
           <button type="button" id="copyViewCitation" class="btn mini-action-btn">Copy Citation</button>
           <button type="button" class="btn reset-btn view-close-btn" data-bs-dismiss="modal">Back to Atlas</button>
         </div>
@@ -238,17 +239,17 @@
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
       <div class="modal-content add-modal-content">
         <div class="modal-header">
-          <h2 class="modal-title fs-5" id="addRuilingModalLabel">Add Ruiling (Sl no. / Case Reference, Verdict, Impact)</h2>
+          <h2 class="modal-title fs-5" id="addRuilingModalLabel">Add Ruiling</h2>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <p class="add-modal-help">
-            Enter 3 required fields and click <strong>Add Ruiling</strong>. Atlas will process the rest automatically and append to database.
-            Serial prefix in the first field is accepted and normalized.
+          <p class="add-mode-badge" id="addModeBadge">Add Mode</p>
+          <p class="add-modal-help" id="addModalHelpText">
+            Enter 3 required fields and click <strong>Add Ruiling</strong>. Atlas will process the rest automatically.
           </p>
 
           <div class="filter-group mb-3">
-            <label for="newCaseReference">Sl no. / Case Reference</label>
+            <label for="newCaseReference">Case Reference / Case Number</label>
             <textarea id="newCaseReference" class="form-control form-control-custom" rows="3" placeholder="Example: AIR 2024 SC ... - Case Name v. Case Name"></textarea>
           </div>
 

@@ -429,6 +429,95 @@ def add_ruiling_to_db(
     return result
 
 
+def update_ruiling_in_db(
+    *,
+    entry_id: int,
+    case_reference: str,
+    verdict: str,
+    impact: str,
+    data_file: str | Path = DEFAULT_DB_PATH,
+    optional_fields: Dict[str, Any] | None = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    case_reference = normalize_case_reference_input(case_reference)
+    verdict = clean(verdict)
+    impact = clean(impact)
+
+    if entry_id <= 0:
+        raise ValueError("entry_id must be a positive integer.")
+    if not case_reference or not verdict or not impact:
+        raise ValueError("All required fields are mandatory: case_reference, verdict, impact.")
+
+    data_path = Path(data_file).resolve()
+    if not data_path.exists():
+        raise FileNotFoundError(f"Database file not found: {data_path}")
+
+    raw = json.loads(data_path.read_text(encoding="utf-8"))
+    entries = raw.get("entries", [])
+    if not isinstance(entries, list):
+        raise ValueError("Invalid data file format: `entries` must be a list.")
+
+    match_index = -1
+    for idx, item in enumerate(entries):
+        item_id = int(item.get("id") or item.get("serial") or 0)
+        if item_id == entry_id:
+            match_index = idx
+            break
+
+    if match_index < 0:
+        raise ValueError(f"Entry not found for id/serial: {entry_id}")
+
+    existing = dict(entries[match_index])
+    serial = int(existing.get("serial") or existing.get("id") or entry_id)
+
+    updated: Dict[str, Any] = {
+        **existing,
+        "id": serial,
+        "serial": serial,
+        "caseReference": case_reference,
+        "issue": verdict,
+        "holding": impact,
+    }
+
+    if optional_fields:
+        updated = apply_optional_overrides(updated, optional_fields)
+
+    updated["category"] = normalize_category(updated.get("category"))
+    updated["subCategory"] = clean(str(updated.get("subCategory", ""))) or "General Litigation Principles"
+    updated["stage"] = clean(str(updated.get("stage", ""))) or "General"
+    updated["court"] = clean(str(updated.get("court", ""))) or infer_court(case_reference)
+
+    parsed_year = parse_year(updated.get("year"))
+    updated["year"] = parsed_year if parsed_year is not None else infer_year(case_reference)
+    updated["statuteTags"] = safe_str_list(updated.get("statuteTags"), max_len=8)
+
+    notes = safe_str_list(updated.get("advocateNotes"), max_len=5)
+    while len(notes) < 2:
+        notes.append("Apply this citation only after matching facts and statutory context.")
+    updated["advocateNotes"] = notes[:5]
+
+    updated["relatedDetails"] = safe_str_list(updated.get("relatedDetails"), max_len=8)
+
+    result = {
+        "entry": updated,
+        "serial": serial,
+        "path": str(data_path),
+    }
+
+    if dry_run:
+        return result
+
+    entries[match_index] = updated
+    source = raw.get("meta", {}).get("source", "Untitled spreadsheet - Sheet1.csv")
+    meta = recompute_meta(entries, source=source)
+    updated_db = {"meta": meta, "entries": entries}
+    data_path.write_text(json.dumps(updated_db, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    result["meta"] = meta
+    result["totalEntries"] = len(entries)
+    return result
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Add a new ruiling entry using LLM enrichment."

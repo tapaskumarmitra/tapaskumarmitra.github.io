@@ -465,6 +465,19 @@ body.topbar-collapsed .filters-toolbar {
   overflow: hidden;
 }
 
+.ruiling-source-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: 999px;
+  border: 1px solid #f59e0b;
+  background: #fff8eb;
+  color: #92400e;
+  padding: 0.16rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
 .ruiling-meta {
   display: flex;
   flex-wrap: wrap;
@@ -962,6 +975,26 @@ body.topbar-collapsed .filters-toolbar {
   margin: 0 0 0.9rem;
   font-size: 0.96rem;
   color: var(--text-muted);
+}
+
+.add-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin: 0 0 0.5rem;
+  border-radius: 999px;
+  border: 1px solid #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+  padding: 0.16rem 0.55rem;
+  font-size: 0.77rem;
+  font-weight: 700;
+}
+
+.add-mode-badge.is-edit {
+  border-color: #f59e0b;
+  background: #fff8eb;
+  color: #92400e;
 }
 
 .add-advanced-wrap {

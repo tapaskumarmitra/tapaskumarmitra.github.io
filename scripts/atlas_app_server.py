@@ -3,6 +3,7 @@
 Local Atlas app server:
 - Serves project files
 - Exposes POST /api/ruilings/add for one-click ruiling add from UI
+- Exposes POST /api/ruilings/edit for in-place ruiling edits from UI
 - Exposes POST /api/ruilings/search for Gemini-powered semantic search
 """
 
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
-from add_ruiling_with_llm import DEFAULT_DB_PATH, add_ruiling_to_db
+from add_ruiling_with_llm import DEFAULT_DB_PATH, add_ruiling_to_db, update_ruiling_in_db
 from gemini_client import call_gemini_json, load_gemini_api_key
 from gemini_config import DEFAULT_GEMINI_MODEL
 
@@ -176,6 +177,9 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ruilings/add":
             self._handle_add_ruiling()
             return
+        if parsed.path == "/api/ruilings/edit":
+            self._handle_edit_ruiling()
+            return
         if parsed.path == "/api/ruilings/search":
             self._handle_semantic_search()
             return
@@ -230,6 +234,83 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     allow_llm_fallback=allow_llm_fallback,
                     dry_run=dry_run,
                 )
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            return
+
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "entry": result.get("entry"),
+                "serial": result.get("serial"),
+                "totalEntries": result.get("totalEntries"),
+                "meta": result.get("meta"),
+            },
+        )
+
+    def _handle_edit_ruiling(self) -> None:
+        try:
+            payload = self._read_json_body()
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+
+        try:
+            entry_id = int(payload.get("id") or payload.get("serial") or 0)
+        except Exception:  # noqa: BLE001
+            entry_id = 0
+
+        case_reference = clean(payload.get("caseReference"))
+        verdict = clean(payload.get("verdict"))
+        impact = clean(payload.get("impact"))
+
+        if entry_id <= 0:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"ok": False, "error": "Required field missing: id."},
+            )
+            return
+
+        if not case_reference or not verdict or not impact:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "ok": False,
+                    "error": "Required fields missing: caseReference, verdict, impact.",
+                },
+            )
+            return
+
+        optional_fields: Dict[str, Any] = {
+            "category": payload.get("category", ""),
+            "subCategory": payload.get("subCategory", ""),
+            "stage": payload.get("stage", ""),
+            "court": payload.get("court", ""),
+            "year": payload.get("year", ""),
+            "statuteTags": payload.get("statuteTags", []),
+            "advocateNotes": payload.get("advocateNotes", []),
+            "relatedDetails": payload.get("relatedDetails", []),
+        }
+
+        dry_run = bool(payload.get("dryRun"))
+
+        try:
+            with DB_LOCK:
+                result = update_ruiling_in_db(
+                    entry_id=entry_id,
+                    case_reference=case_reference,
+                    verdict=verdict,
+                    impact=impact,
+                    optional_fields=optional_fields,
+                    dry_run=dry_run,
+                )
+        except ValueError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+        except FileNotFoundError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": str(exc)})
+            return
         except Exception as exc:  # noqa: BLE001
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
             return
