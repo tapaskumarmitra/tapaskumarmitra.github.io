@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -28,6 +29,18 @@ from gemini_config import DEFAULT_GEMINI_MODEL
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = PROJECT_ROOT / "assets" / "data" / "ruilings.json"
+
+
+def _parse_add_timeout_seconds() -> int:
+    raw = str(os.getenv("ADD_LLM_TIMEOUT_SECONDS", "20") or "").strip() or "20"
+    try:
+        value = int(raw)
+    except Exception:  # noqa: BLE001
+        value = 20
+    return max(5, min(value, 90))
+
+
+ADD_LLM_TIMEOUT_SECONDS = _parse_add_timeout_seconds()
 
 
 ALLOWED_CATEGORIES = [
@@ -220,7 +233,7 @@ def llm_enrich(
         system_prompt=SYSTEM_PROMPT,
         user_prompt=user_prompt,
         temperature=0.1,
-        timeout=90,
+        timeout=ADD_LLM_TIMEOUT_SECONDS,
     )
 
 

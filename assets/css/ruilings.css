@@ -354,6 +354,13 @@ body.topbar-collapsed .filters-toolbar {
   gap: 0.56rem;
 }
 
+.results-status-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.56rem;
+  align-items: center;
+}
+
 .ruiling-result-count {
   border: 1px solid var(--border);
   background: var(--surface-soft);
@@ -362,6 +369,58 @@ body.topbar-collapsed .filters-toolbar {
   color: var(--text-secondary);
   font-size: 0.98rem;
   font-weight: 600;
+}
+
+.server-warm-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: #fff;
+  padding: 0.34rem 0.64rem;
+  color: var(--text-secondary);
+  font-size: 0.83rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.server-warm-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #94a3b8;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.12);
+}
+
+.server-warm-status.ready {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #166534;
+}
+
+.server-warm-status.ready .server-warm-dot {
+  background: #16a34a;
+}
+
+.server-warm-status.checking {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.server-warm-status.checking .server-warm-dot {
+  background: #2563eb;
+}
+
+.server-warm-status.waking {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
+}
+
+.server-warm-status.waking .server-warm-dot {
+  background: #f97316;
 }
 
 .active-filters {
@@ -1135,6 +1194,15 @@ body.topbar-collapsed .filters-toolbar {
 
   .cards-grid {
     grid-template-columns: 1fr;
+  }
+
+  .results-status-row {
+    grid-template-columns: 1fr;
+  }
+
+  .server-warm-status {
+    justify-content: flex-start;
+    width: fit-content;
   }
 
   .ruiling-card {

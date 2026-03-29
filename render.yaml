@@ -21,5 +21,17 @@ services:
         value: assets/data/ruilings.json
       - key: GITHUB_TIMEOUT_SECONDS
         value: "30"
+      - key: DB_CACHE_TTL_SECONDS
+        value: "120"
+      - key: SEARCH_LLM_TIMEOUT_SECONDS
+        value: "14"
+      - key: SEARCH_LLM_CANDIDATE_LIMIT
+        value: "36"
+      - key: SEARCH_CACHE_TTL_SECONDS
+        value: "900"
+      - key: SEARCH_CACHE_MAX_ENTRIES
+        value: "180"
+      - key: ADD_LLM_TIMEOUT_SECONDS
+        value: "20"
       - key: ALLOWED_ORIGINS
         sync: false

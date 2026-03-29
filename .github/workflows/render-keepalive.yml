@@ -3,13 +3,13 @@ name: Render Keepalive
 on:
   schedule:
     # GitHub Actions cron runs in UTC.
-    # Target window: 06:00 to 23:59 IST (UTC+05:30), every ~14 minutes.
-    # 00:30-00:58 UTC
-    - cron: "30,44,58 0 * * *"
-    # 01:00-17:56 UTC
-    - cron: "0,14,28,42,56 1-17 * * *"
+    # Target window: 06:00 to 23:59 IST (UTC+05:30), every 5 minutes.
+    # 00:30-00:55 UTC
+    - cron: "30-59/5 0 * * *"
+    # 01:00-17:55 UTC
+    - cron: "*/5 1-17 * * *"
     # 18:00-18:28 UTC
-    - cron: "0,14,28 18 * * *"
+    - cron: "0-25/5,28 18 * * *"
   workflow_dispatch:
 
 jobs:
@@ -17,26 +17,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
+      RENDER_WARMUP_URL: https://atlas-api-kh7d.onrender.com/warmup
       RENDER_HEALTH_URL: https://atlas-api-kh7d.onrender.com/health
     steps:
-      - name: Ping Render health endpoint
+      - name: Ping Render warmup endpoint
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Pinging: ${RENDER_HEALTH_URL}"
+          echo "Pinging warmup: ${RENDER_WARMUP_URL}"
 
           for attempt in 1 2 3; do
-            http_code="$(curl -sS -o health.json -w "%{http_code}" --max-time 25 "${RENDER_HEALTH_URL}" || true)"
-            echo "Attempt ${attempt}: HTTP ${http_code}"
+            http_code="$(curl -sS -o warmup.json -w "%{http_code}" --max-time 25 "${RENDER_WARMUP_URL}" || true)"
+            echo "Warmup attempt ${attempt}: HTTP ${http_code}"
             if [ "${http_code}" = "200" ]; then
-              echo "Health response:"
-              cat health.json
+              echo "Warmup response:"
+              cat warmup.json
               exit 0
             fi
             sleep 10
           done
 
-          echo "Failed to get healthy response from Render service."
+          echo "Warmup failed, checking health endpoint once."
+          health_code="$(curl -sS -o health.json -w "%{http_code}" --max-time 20 "${RENDER_HEALTH_URL}" || true)"
+          echo "Health HTTP ${health_code}"
+          [ -f warmup.json ] && cat warmup.json || true
           [ -f health.json ] && cat health.json || true
           exit 1

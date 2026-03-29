@@ -145,7 +145,13 @@
 
         <section class="results-panel" aria-label="Ruilings results">
           <div class="results-topbar">
-            <div id="resultCount" class="ruiling-result-count" aria-live="polite">Loading ruilings...</div>
+            <div class="results-status-row">
+              <div id="resultCount" class="ruiling-result-count" aria-live="polite">Loading ruilings...</div>
+              <div id="serverWarmStatus" class="server-warm-status checking" aria-live="polite" role="status">
+                <span class="server-warm-dot" aria-hidden="true"></span>
+                <span id="serverWarmStatusText">Connecting secure server...</span>
+              </div>
+            </div>
             <div id="activeFilters" class="active-filters" aria-live="polite"></div>
           </div>
 
