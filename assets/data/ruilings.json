@@ -275,7 +275,7 @@
         "count": 1
       }
     ],
-    "generatedOn": "2026-03-28"
+    "generatedOn": "2026-03-29"
   },
   "entries": [
     {
@@ -709,7 +709,7 @@
     {
       "id": 11,
       "serial": 11,
-      "caseReference": "AIR 2011 SC 697- State of UP V. Chhoteylal",
+      "caseReference": "AIR 2011 SC 697 State of UP V. Chhoteylal",
       "issue": "Can the absence of immediate alarm or physical resistance by a prosecutrix in a kidnapping and rape case lead to an inference of willing accompaniment or consent, especially when under threat?",
       "holding": "No, the absence of alarm by the prosecutrix at public places cannot automatically lead to an inference of willing accompaniment or consent. The Supreme Court held that when a victim is kidnapped by adult males, one of whom wields a firearm and issues threats, her decision not to raise an alarm is a sensible survival response to avoid endangering her life. The Court emphasized that victim testimony, if reliable, can be sufficient for conviction, and her evidence should not be viewed with suspicion or subjected to stereotypical expectations of how a victim 'should' react. The High Court's acquittal based on such stereotypical grounds was overturned.",
       "category": "Sexual Offences & Gender Justice",
@@ -724,14 +724,17 @@
         "Indian Evidence Act"
       ],
       "advocateNotes": [
-        "Highlight the prosecutrix's testimony as primary evidence; emphasize its inherent reliability, noting that corroboration is not a legal mandate but strengthens the case.",
-        "Vigorously challenge defense arguments predicated on 'ideal victim' stereotypes, such as absence of immediate resistance, delay in reporting, or lack of physical injuries, by contextualizing the victim's actions under duress and fear.",
-        "Argue that consent cannot be inferred from passive submission when the victim is under threat or fear, as such submission is a sensible survival response rather than willing participation."
+        "Highlight the prosecutrix's testimony as primary evidence",
+        "emphasize its inherent reliability",
+        "noting that corroboration is not a legal mandate but strengthens the case.",
+        "Vigorously challenge defense arguments predicated on 'ideal victim' stereotypes",
+        "such as absence of immediate resistance"
       ],
       "relatedDetails": [
         "Consent under duress or fear",
         "Stereotypical notions of victim behavior in sexual assault cases",
-        "Section 114A, Indian Evidence Act (Presumption as to absence of consent)",
+        "Section 114A",
+        "Indian Evidence Act (Presumption as to absence of consent)",
         "Evolution of 'consent' in Section 375 IPC (post-2013 amendments)",
         "Credibility of victim testimony in sexual assault cases"
       ],
