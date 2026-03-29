@@ -2,6 +2,7 @@
 """
 Local Atlas app server:
 - Serves project files
+- Exposes GET /health for health checks
 - Exposes POST /api/ruilings/add for one-click ruiling add from UI
 - Exposes POST /api/ruilings/edit for in-place ruiling edits from UI
 - Exposes POST /api/ruilings/search for Gemini-powered semantic search
@@ -13,6 +14,7 @@ import json
 import threading
 import argparse
 import re
+import os
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +37,19 @@ SEARCH_SYSTEM_PROMPT = (
     "3) Include only ids present in supplied entries. "
     "4) No markdown and no extra keys."
 )
+
+
+def parse_allowed_origins() -> set[str]:
+    raw = os.getenv("ALLOWED_ORIGINS", "")
+    out = set()
+    for item in raw.split(","):
+        cleaned = str(item or "").strip().rstrip("/")
+        if cleaned:
+            out.add(cleaned)
+    return out
+
+
+ALLOWED_ORIGINS = parse_allowed_origins()
 
 
 def clean(value: Any) -> str:
@@ -167,12 +182,43 @@ class AtlasHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PROJECT_ROOT), **kwargs)
 
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path == "/health":
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "service": "atlas-app-server",
+                    "status": "healthy",
+                },
+            )
+            return
+        super().do_GET()
+
     def do_OPTIONS(self) -> None:  # noqa: N802
+        origin = clean(self.headers.get("Origin"))
+        if not self._origin_is_allowed(origin):
+            self._send_error_json(
+                HTTPStatus.FORBIDDEN,
+                "Origin is not allowed by CORS policy.",
+                code="forbidden_origin",
+            )
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
-        self._send_common_headers(content_type="application/json")
+        self._send_common_headers(content_type="application/json", origin=origin)
         self.end_headers()
 
     def do_POST(self) -> None:  # noqa: N802
+        origin = clean(self.headers.get("Origin"))
+        if not self._origin_is_allowed(origin):
+            self._send_error_json(
+                HTTPStatus.FORBIDDEN,
+                "Origin is not allowed by CORS policy.",
+                code="forbidden_origin",
+            )
+            return
+
         parsed = urlparse(self.path)
         if parsed.path == "/api/ruilings/add":
             self._handle_add_ruiling()
@@ -183,13 +229,17 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/ruilings/search":
             self._handle_semantic_search()
             return
-        self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Endpoint not found."})
+        self._send_error_json(
+            HTTPStatus.NOT_FOUND,
+            f"Endpoint not found: {parsed.path}",
+            code="endpoint_not_found",
+        )
 
     def _handle_add_ruiling(self) -> None:
         try:
             payload = self._read_json_body()
         except ValueError as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_json_payload")
             return
 
         case_reference = clean(payload.get("caseReference"))
@@ -197,12 +247,10 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         impact = clean(payload.get("impact"))
 
         if not case_reference or not verdict or not impact:
-            self._send_json(
+            self._send_error_json(
                 HTTPStatus.BAD_REQUEST,
-                {
-                    "ok": False,
-                    "error": "Required fields missing: caseReference, verdict, impact.",
-                },
+                "Required fields missing: caseReference, verdict, impact.",
+                code="missing_required_fields",
             )
             return
 
@@ -235,7 +283,7 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     dry_run=dry_run,
                 )
         except Exception as exc:  # noqa: BLE001
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="add_ruiling_failed")
             return
 
         self._send_json(
@@ -253,7 +301,7 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._read_json_body()
         except ValueError as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_json_payload")
             return
 
         try:
@@ -266,19 +314,18 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         impact = clean(payload.get("impact"))
 
         if entry_id <= 0:
-            self._send_json(
+            self._send_error_json(
                 HTTPStatus.BAD_REQUEST,
-                {"ok": False, "error": "Required field missing: id."},
+                "Required field missing: id.",
+                code="missing_entry_id",
             )
             return
 
         if not case_reference or not verdict or not impact:
-            self._send_json(
+            self._send_error_json(
                 HTTPStatus.BAD_REQUEST,
-                {
-                    "ok": False,
-                    "error": "Required fields missing: caseReference, verdict, impact.",
-                },
+                "Required fields missing: caseReference, verdict, impact.",
+                code="missing_required_fields",
             )
             return
 
@@ -306,13 +353,13 @@ class AtlasHandler(SimpleHTTPRequestHandler):
                     dry_run=dry_run,
                 )
         except ValueError as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_edit_request")
             return
         except FileNotFoundError as exc:
-            self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.NOT_FOUND, str(exc), code="db_file_not_found")
             return
         except Exception as exc:  # noqa: BLE001
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="edit_ruiling_failed")
             return
 
         self._send_json(
@@ -330,14 +377,15 @@ class AtlasHandler(SimpleHTTPRequestHandler):
         try:
             payload = self._read_json_body()
         except ValueError as exc:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.BAD_REQUEST, str(exc), code="invalid_json_payload")
             return
 
         query = clean(payload.get("query"))
         if len(query) < 2:
-            self._send_json(
+            self._send_error_json(
                 HTTPStatus.BAD_REQUEST,
-                {"ok": False, "error": "Query must contain at least 2 characters."},
+                "Query must contain at least 2 characters.",
+                code="invalid_query",
             )
             return
 
@@ -349,14 +397,15 @@ class AtlasHandler(SimpleHTTPRequestHandler):
             with DB_LOCK:
                 raw = json.loads(Path(DEFAULT_DB_PATH).read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
-            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": str(exc)})
+            self._send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc), code="db_read_failed")
             return
 
         entries = raw.get("entries", [])
         if not isinstance(entries, list):
-            self._send_json(
+            self._send_error_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
-                {"ok": False, "error": "Invalid database structure: entries list missing."},
+                "Invalid database structure: entries list missing.",
+                code="invalid_db_structure",
             )
             return
 
@@ -428,20 +477,53 @@ class AtlasHandler(SimpleHTTPRequestHandler):
             raise ValueError("JSON payload must be an object.")
         return payload
 
-    def _send_common_headers(self, *, content_type: str) -> None:
+    def _origin_is_allowed(self, origin: str) -> bool:
+        normalized_origin = clean(origin).rstrip("/")
+        if not normalized_origin:
+            # Allow non-browser or same-origin requests without Origin header.
+            return True
+        if not ALLOWED_ORIGINS:
+            # Local default when no explicit allowlist configured.
+            return True
+        return normalized_origin in ALLOWED_ORIGINS
+
+    def _allowed_origin_value(self, origin: str) -> str | None:
+        normalized_origin = clean(origin).rstrip("/")
+        if normalized_origin and self._origin_is_allowed(normalized_origin):
+            return normalized_origin
+        if not ALLOWED_ORIGINS:
+            return "*"
+        return None
+
+    def _send_common_headers(self, *, content_type: str, origin: str = "") -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        allowed_origin = self._allowed_origin_value(origin)
+        if allowed_origin:
+            self.send_header("Access-Control-Allow-Origin", allowed_origin)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 
     def _send_json(self, status: HTTPStatus, payload: Dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        origin = clean(self.headers.get("Origin"))
         self.send_response(status)
-        self._send_common_headers(content_type="application/json; charset=utf-8")
+        self._send_common_headers(content_type="application/json; charset=utf-8", origin=origin)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _send_error_json(self, status: HTTPStatus, message: str, *, code: str = "request_error") -> None:
+        self._send_json(
+            status,
+            {
+                "ok": False,
+                "error": clean(message) or "Request failed.",
+                "code": code,
+                "status": int(status),
+            },
+        )
 
 
 def parse_args() -> argparse.Namespace:
@@ -458,6 +540,11 @@ def main() -> None:
     server = ThreadingHTTPServer((host, port), AtlasHandler)
     print(f"Atlas app server running at http://{host}:{port}")
     print(f"Open http://{host}:{port}/ruilings")
+    print(f"Health check: http://{host}:{port}/health")
+    if ALLOWED_ORIGINS:
+        print(f"CORS allowlist active: {', '.join(sorted(ALLOWED_ORIGINS))}")
+    else:
+        print("CORS allowlist not set (ALLOWED_ORIGINS empty) -> allowing all origins.")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
