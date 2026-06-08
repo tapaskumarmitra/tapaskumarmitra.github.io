@@ -10,3 +10,6 @@ scripts/.gemini_api_key
 __pycache__/
 **/__pycache__/
 *.pyc
+
+# SGNK continuity snapshots (local working memory)
+.sgnk/
